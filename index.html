@@ -9,6 +9,7 @@
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap');
   body { margin: 0; }
@@ -29,6 +30,14 @@
 <script type="text/plain" id="app-source">
 
 const { useState, useMemo, useRef, useEffect } = React;
+
+// ---------------- Supabase ----------------
+// Public/anon (publishable) key — safe to expose client-side. The service_role key must
+// never appear here; it only ever lives server-side (Vault / Edge Functions).
+const SUPABASE_URL = "https://sdxvgujpubsrwiwzcobz.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_wdWsWE97HtXCesDkRwA0Yg_Z-HnzvZU";
+const { createClient } = window.supabase;
+const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 function IconBase({ size = 18, className = "", children, ...rest }) {
   return (
@@ -366,31 +375,52 @@ function KPIApp() {
   const [reviews, setReviews] = useState(seed.reviews);
   const [rewards, setRewards] = useState(seed.rewards);
   const [rewardSchemes, setRewardSchemes] = useState(seed.rewardSchemes || []);
-  const [session, setSession] = useState(null); // {role, employeeId, name}
+  const [session, setSession] = useState(null); // {role, employeeId, name, email, deptId, companyId}
+  const [authLoading, setAuthLoading] = useState(true);
 
-  // Remember-me: auto-restore a previous session if the browser remembers it
-  useEffect(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem("scorecard_session") || "null");
-      if (saved && saved.role === "staff" && employees.find((e) => e.id === saved.employeeId)) {
-        setSession(saved);
-      } else if (saved && saved.role === "ceo") {
-        setSession(saved);
-      }
-    } catch (e) { /* ignore malformed storage */ }
-  }, []);
-
-  const loginWithRemember = (newSession, remember) => {
-    setSession(newSession);
-    try {
-      if (remember) localStorage.setItem("scorecard_session", JSON.stringify(newSession));
-      else localStorage.removeItem("scorecard_session");
-    } catch (e) { /* ignore storage errors (e.g. private browsing) */ }
+  // Look up the employees row for a logged-in Supabase auth user and turn it into our session shape.
+  const hydrateSessionFromUser = async (authUser) => {
+    if (!authUser) { setSession(null); return; }
+    const { data: emp, error: empError } = await supabaseClient
+      .from("employees")
+      .select("*")
+      .eq("id", authUser.id)
+      .single();
+    if (empError || !emp) { setSession(null); return; }
+    setSession({
+      role: emp.role,
+      employeeId: emp.id,
+      name: emp.name,
+      email: emp.email,
+      deptId: emp.dept_id ?? emp.department_id ?? null,
+      companyId: emp.company_id ?? null,
+    });
   };
 
-  const handleLogout = () => {
+  // Real Supabase session: restore it on load, and stay in sync with sign-in/out
+  // (including token refresh) for as long as the app is open.
+  useEffect(() => {
+    let active = true;
+    supabaseClient.auth.getSession().then(({ data: { session: authSession } }) => {
+      if (!active) return;
+      if (authSession && authSession.user) {
+        hydrateSessionFromUser(authSession.user).finally(() => active && setAuthLoading(false));
+      } else {
+        setAuthLoading(false);
+      }
+    });
+    const { data: listener } = supabaseClient.auth.onAuthStateChange((event, authSession) => {
+      if (event === "SIGNED_OUT") { setSession(null); return; }
+      if (event === "SIGNED_IN" && authSession && authSession.user) {
+        hydrateSessionFromUser(authSession.user);
+      }
+    });
+    return () => { active = false; listener.subscription.unsubscribe(); };
+  }, []);
+
+  const handleLogout = async () => {
     setSession(null);
-    try { localStorage.removeItem("scorecard_session"); } catch (e) {}
+    try { await supabaseClient.auth.signOut(); } catch (e) {}
   };
 
   const deptById = useMemo(() => {
@@ -767,12 +797,20 @@ function KPIApp() {
   };
   const markNotificationsRead = (empId) => setNotifications((prev) => prev.map((n) => n.empId === empId ? { ...n, read: true } : n));
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="w-8 h-8 rounded-full border-2 border-slate-300 border-t-slate-900 animate-spin" />
+      </div>
+    );
+  }
+
   if (!session) {
     return (
       <div className="min-h-full bg-slate-50 font-sans">
         <style>{FONT_STYLE}</style>
         <style>{deptStylesheet(departments)}</style>
-        <LoginScreen departments={departments} findEmployeeByEmail={findEmployeeByEmail} onLogin={loginWithRemember} />
+        <LoginScreen onLogin={setSession} />
       </div>
     );
   }
@@ -811,25 +849,49 @@ function KPIApp() {
 
 // ---------------- Login / Signup ----------------
 
-function LoginScreen({ findEmployeeByEmail, onLogin }) {
-  const [role, setRole] = useState("staff");
-  const [name, setName] = useState("");
+function LoginScreen({ onLogin }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [remember, setRemember] = useState(true);
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
 
-  const submit = () => {
+  const submit = async () => {
     setError("");
-    if (role === "ceo") {
-      onLogin({ role: "ceo", name: name.trim() || "CEO" }, remember);
-      return;
-    }
     if (!email.trim() || !password) { setError("Enter your email and password."); return; }
-    const emp = findEmployeeByEmail(email);
-    if (!emp) { setError("No account found for that email. Ask your admin to set one up in People management."); return; }
-    if (emp.password !== password) { setError("Incorrect password."); return; }
-    onLogin({ role: "staff", employeeId: emp.id, name: emp.name }, remember);
+    setBusy(true);
+    try {
+      const { data, error: authError } = await supabaseClient.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
+      if (authError) {
+        setError(authError.message === "Invalid login credentials" ? "Incorrect email or password." : authError.message);
+        setBusy(false);
+        return;
+      }
+      const { data: emp, error: empError } = await supabaseClient
+        .from("employees")
+        .select("*")
+        .eq("id", data.user.id)
+        .single();
+      if (empError || !emp) {
+        setError("Signed in, but no employee record was found for this account. Ask your admin to link it.");
+        await supabaseClient.auth.signOut();
+        setBusy(false);
+        return;
+      }
+      onLogin({
+        role: emp.role,
+        employeeId: emp.id,
+        name: emp.name,
+        email: emp.email,
+        deptId: emp.dept_id ?? emp.department_id ?? null,
+        companyId: emp.company_id ?? null,
+      });
+    } catch (e) {
+      setError("Something went wrong signing you in. Please try again.");
+      setBusy(false);
+    }
   };
 
   return (
@@ -843,39 +905,32 @@ function LoginScreen({ findEmployeeByEmail, onLogin }) {
         </div>
 
         <div className="bg-white rounded-xl border border-slate-200 p-6">
-          <div className="flex bg-slate-100 rounded-lg p-1 mb-4">
-            <button onClick={() => setRole("staff")} className={`flex-1 py-1.5 rounded-md text-sm font-medium transition-colors ${role === "staff" ? "bg-white shadow-sm text-slate-900" : "text-slate-500"}`}>Staff</button>
-            <button onClick={() => setRole("ceo")} className={`flex-1 py-1.5 rounded-md text-sm font-medium transition-colors ${role === "ceo" ? "bg-white shadow-sm text-slate-900" : "text-slate-500"}`}>CEO / Admin</button>
-          </div>
-
-          {role === "staff" ? (
-            <>
-              <label className="block text-xs font-medium text-slate-500 mb-1.5">Email</label>
-              <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" className="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-teal-600" />
-              <label className="block text-xs font-medium text-slate-500 mb-1.5">Password</label>
-              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" className="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-teal-600" />
-              <label className="flex items-center gap-2 text-xs text-slate-500 mb-4">
-                <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} className="accent-teal-600" />
-                Remember me on this device
-              </label>
-            </>
-          ) : (
-            <>
-              <label className="block text-xs font-medium text-slate-500 mb-1.5">Name</label>
-              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Enter your name" className="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-teal-600" />
-              <label className="block text-xs font-medium text-slate-500 mb-1.5">Password</label>
-              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" className="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-teal-600" />
-            </>
-          )}
+          <label className="block text-xs font-medium text-slate-500 mb-1.5">Email</label>
+          <input
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+            placeholder="you@company.com"
+            className="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-teal-600"
+          />
+          <label className="block text-xs font-medium text-slate-500 mb-1.5">Password</label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+            placeholder="••••••••"
+            className="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-teal-600"
+          />
 
           {error && <p className="text-xs text-rose-500 mb-3">{error}</p>}
 
-          <button onClick={submit} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-700 transition-colors">
+          <button onClick={submit} disabled={busy} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-700 transition-colors disabled:opacity-60">
             <LogIn size={15} />
-            Log in
+            {busy ? "Signing in…" : "Log in"}
           </button>
           <p className="text-[11px] text-slate-400 mt-3 text-center">
-            {role === "staff" ? "Staff accounts are created by your admin in People management — you can't self-register." : "Prototype login — any password is accepted."}
+            Accounts are created by your admin in People management — you can't self-register.
           </p>
         </div>
       </div>
