@@ -196,6 +196,13 @@ const monthLabel = (isoMonth) => { const [y, m] = isoMonth.split("-").map(Number
 const monthShortLabel = (isoMonth) => { const [y, m] = isoMonth.split("-").map(Number); return new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: "short" }); };
 const nextIsoMonth = (isoMonth) => { const [y, m] = isoMonth.split("-").map(Number); const d = new Date(y, m, 1); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; };
 const endOfMonth = (isoMonth) => { const [y, m] = isoMonth.split("-").map(Number); return isoDate(new Date(y, m, 0)); };
+
+// Attachments are stored as a path in the private "task-attachments" Supabase Storage bucket (not
+// the file itself), so goal_records.attachment_url just holds that path string. These helpers turn
+// a stored path back into something displayable without a round-trip: the filename after stripping
+// our "<timestamp>-" prefix, and whether it looks like an image (to decide thumbnail vs. generic icon).
+const attachmentFileName = (path) => { if (!path) return ""; const last = path.split("/").pop() || path; return last.replace(/^\d+-/, ""); };
+const attachmentIsImage = (path) => /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(path || "");
 const monthsOfYear = (year) => Array.from({ length: 12 }, (_, i) => `${year}-${pad(i + 1)}`);
 const isoMonthOf = (iso) => iso.slice(0, 7); // "2026-04-15" -> "2026-04"
 const monthsInRange = (startDate, endDate) => {
@@ -418,22 +425,38 @@ function KPIApp() {
     return () => { active = false; listener.subscription.unsubscribe(); };
   }, []);
 
-  // Core reference data: once we have a real session, pull companies/departments/employees from
-  // Supabase, replacing the old demo seed entirely. Goals/check-ins/reviews/rewards start empty
-  // here rather than faking data against real people — those get wired up in later phases.
+  // Core data: once we have a real session, pull companies/departments/employees, plus goals + their
+  // tasks/assignments/records, from Supabase — replacing the old demo seed entirely. Reshaped into the
+  // exact same nested shape (tasks/assignedEmployeeIds embedded in each goal, records keyed by
+  // "empId::goalId::taskId") the rest of the app already expects, so nothing downstream needed to change.
+  // monthlyHistory/futureVersions are now real too: goal_month_history holds frozen past-month snapshots
+  // (written by the nightly rollover_annual_goals() job) and goal_future_versions holds scheduled changes
+  // the admin queued up. Only the live/current month lives directly in goal_tasks/goal_assignments/goal_records.
   useEffect(() => {
     if (!session) { setDataLoading(true); return; }
     let active = true;
     (async () => {
-      const [companiesRes, departmentsRes, employeesRes] = await Promise.all([
+      const [companiesRes, departmentsRes, employeesRes, goalsRes, tasksRes, assignmentsRes, recordsRes, historyRes, futureRes] = await Promise.all([
         supabaseClient.from("companies").select("*"),
         supabaseClient.from("departments").select("*"),
         supabaseClient.from("employees").select("*"),
+        supabaseClient.from("goals").select("*"),
+        supabaseClient.from("goal_tasks").select("*").order("sort_order", { ascending: true }),
+        supabaseClient.from("goal_assignments").select("*"),
+        supabaseClient.from("goal_records").select("*"),
+        supabaseClient.from("goal_month_history").select("*"),
+        supabaseClient.from("goal_future_versions").select("*"),
       ]);
       if (!active) return;
       if (companiesRes.error) console.error("Failed to load companies:", companiesRes.error);
       if (departmentsRes.error) console.error("Failed to load departments:", departmentsRes.error);
       if (employeesRes.error) console.error("Failed to load employees:", employeesRes.error);
+      if (goalsRes.error) console.error("Failed to load goals:", goalsRes.error);
+      if (tasksRes.error) console.error("Failed to load goal tasks:", tasksRes.error);
+      if (assignmentsRes.error) console.error("Failed to load goal assignments:", assignmentsRes.error);
+      if (recordsRes.error) console.error("Failed to load goal records:", recordsRes.error);
+      if (historyRes.error) console.error("Failed to load goal month history:", historyRes.error);
+      if (futureRes.error) console.error("Failed to load goal future versions:", futureRes.error);
 
       setCompanies((companiesRes.data || []).map((c) => ({
         id: c.id, name: c.name, active: c.active !== false,
@@ -446,6 +469,67 @@ function KPIApp() {
         id: e.id, name: e.name, email: e.email, password: null, role: e.role,
         deptId: e.dept_id ?? e.department_id ?? null, active: e.active !== false,
       })));
+
+      const tasksByGoal = {};
+      (tasksRes.data || []).forEach((t) => {
+        (tasksByGoal[t.goal_id] || (tasksByGoal[t.goal_id] = [])).push({
+          id: t.id, text: t.text, weight: Number(t.weight),
+          requiresAttachment: !!t.requires_attachment, requiresRemark: !!t.requires_remark,
+        });
+      });
+      const assignedByGoal = {};
+      (assignmentsRes.data || []).forEach((a) => {
+        (assignedByGoal[a.goal_id] || (assignedByGoal[a.goal_id] = [])).push(a.employee_id);
+      });
+
+      // Frozen past-month snapshots. tasks_snapshot entries here carry the *real* task ids they had
+      // at rollover time (the rollover function copies them straight from goal_tasks), because
+      // records_snapshot is keyed by those same ids — unlike future-version drafts, these can't be
+      // given fresh client-side ids without breaking the tasks<->records link.
+      const historyByGoal = {};
+      (historyRes.data || []).forEach((h) => {
+        const tasks = (h.tasks_snapshot || []).map((t) => ({
+          id: t.id, text: t.text, weight: Number(t.weight),
+          requiresAttachment: !!t.requiresAttachment, requiresRemark: !!t.requiresRemark,
+        }));
+        (historyByGoal[h.goal_id] || (historyByGoal[h.goal_id] = {}))[h.iso_month] = {
+          tasks, assignedEmployeeIds: h.assigned_snapshot || [], records: h.records_snapshot || {},
+        };
+      });
+
+      // Scheduled future changes. These are just drafts with no records tied to them yet, so it's
+      // safe to hand each task a fresh client-side id here.
+      const futureByGoal = {};
+      (futureRes.data || []).forEach((f) => {
+        const tasks = (f.tasks_snapshot || []).map((t) => ({
+          id: t.id || nextId("task"), text: t.text, weight: Number(t.weight),
+          requiresAttachment: !!t.requiresAttachment, requiresRemark: !!t.requiresRemark,
+        }));
+        (futureByGoal[f.goal_id] || (futureByGoal[f.goal_id] = [])).push({
+          effectiveFromMonth: f.effective_from_month, tasks, assignedEmployeeIds: f.assigned_snapshot || [],
+        });
+      });
+
+      setGoals((goalsRes.data || []).map((g) => ({
+        id: g.id, deptId: g.dept_id, name: g.name, description: g.description || "",
+        isTeamGoal: g.is_team_goal, autoAssignWholeDept: g.auto_assign_whole_dept, isAnnual: g.is_annual,
+        active: g.active, startDate: g.start_date, endDate: g.end_date,
+        reviewCutoffDate: g.review_cutoff_date, reviewCutoffOffsetDays: g.review_cutoff_offset_days,
+        liveMonth: g.live_month,
+        tasks: tasksByGoal[g.id] || [], assignedEmployeeIds: assignedByGoal[g.id] || [],
+        monthlyHistory: historyByGoal[g.id] || {}, futureVersions: futureByGoal[g.id] || [],
+      })));
+
+      const mappedRecords = {};
+      (recordsRes.data || []).forEach((r) => {
+        mappedRecords[`${r.employee_id}::${r.goal_id}::${r.task_id}`] = {
+          done: r.done, approval: r.approval, remark: r.remark || "", adminRemark: r.admin_remark || "",
+          submittedAt: r.submitted_at, awardedPoints: r.awarded_points, awardedWeight: r.awarded_weight,
+          attachment: r.attachment_url, noAttachmentReason: !!r.no_attachment_reason,
+        };
+      });
+      setGoalRecords(mappedRecords);
+
       setDataLoading(false);
     })();
     return () => { active = false; };
@@ -478,39 +562,73 @@ function KPIApp() {
     return new Date() > new Date((goal.reviewCutoffDate || goal.endDate) + "T23:59:59");
   };
 
+  // Writes one goal_records row to Supabase. employee_id/goal_id/task_id is this table's natural key
+  // (a single record per employee per task), so every write is a whole-row upsert rather than a patch —
+  // simplest way to stay correct given how many different fields the various mutators below each touch.
+  const persistRecord = (empId, goalId, taskId, record) => {
+    supabaseClient.from("goal_records").upsert({
+      employee_id: empId,
+      goal_id: goalId,
+      task_id: taskId,
+      done: !!record.done,
+      approval: record.approval || "none",
+      remark: record.remark || null,
+      admin_remark: record.adminRemark || null,
+      submitted_at: record.submittedAt || null,
+      awarded_points: record.awardedPoints ?? null,
+      awarded_weight: record.awardedWeight ?? null,
+      attachment_url: record.attachment || null,
+      no_attachment_reason: !!record.noAttachmentReason,
+    }, { onConflict: "employee_id,goal_id,task_id" }).then(({ error }) => { if (error) console.error("Failed to save goal record:", error); });
+  };
+
   // Toggling: staff use this to tick/untick their own task. Admin uses adminUntick (below) instead, which notifies.
   const toggleTask = (empId, goal, taskId) => {
     if (isGoalLocked(goal)) return;
-    setGoalRecords((prev) => {
-      const k = key(empId, goal.id, taskId);
-      const cur = prev[k] || defaultRecord();
-      if (cur.done) {
-        return { ...prev, [k]: { ...cur, done: false, approval: "none", awardedPoints: null } };
-      }
-      return { ...prev, [k]: { ...cur, done: true, approval: "pending", submittedAt: new Date().toISOString() } };
-    });
+    const k = key(empId, goal.id, taskId);
+    const cur = goalRecords[k] || defaultRecord();
+    const merged = cur.done
+      ? { ...cur, done: false, approval: "none", awardedPoints: null }
+      : { ...cur, done: true, approval: "pending", submittedAt: new Date().toISOString() };
+    setGoalRecords((prev) => ({ ...prev, [k]: merged }));
+    persistRecord(empId, goal.id, taskId, merged);
   };
 
   // Admin un-ticking a submission — distinct from staff's own toggleTask because this notifies the employee.
   const adminUntick = (empId, goal, taskId) => {
     const task = goal.tasks.find((t) => t.id === taskId);
     const rec = getRecord(empId, goal.id, taskId);
-    setGoalRecords((prev) => {
-      const k = key(empId, goal.id, taskId);
-      const cur = prev[k] || defaultRecord();
-      return { ...prev, [k]: { ...cur, done: false, approval: "none", awardedPoints: null } };
-    });
+    const k = key(empId, goal.id, taskId);
+    const merged = { ...rec, done: false, approval: "none", awardedPoints: null };
+    setGoalRecords((prev) => ({ ...prev, [k]: merged }));
+    persistRecord(empId, goal.id, taskId, merged);
     if (task) addNotification(empId, `"${task.text}" was un-ticked by management${rec.adminRemark ? ` — ${rec.adminRemark}` : ""}`, true);
   };
 
   // Used for tasks that require an attachment and/or remark: staff supplies these at the same time as ticking.
-  const submitTaskWithDetails = (empId, goal, taskId, { remark, attachment, noAttachmentReason }) => {
+  // `attachment`, if present, is { name, file } (the raw File the staff member just picked) — it gets
+  // uploaded to the private task-attachments bucket here, and only the resulting storage path is what
+  // actually gets saved to goalRecords/goal_records (never the file's bytes/data URL).
+  const submitTaskWithDetails = async (empId, goal, taskId, { remark, attachment, noAttachmentReason }) => {
     if (isGoalLocked(goal)) return;
-    setGoalRecords((prev) => {
-      const k = key(empId, goal.id, taskId);
-      const cur = prev[k] || defaultRecord();
-      return { ...prev, [k]: { ...cur, done: true, approval: "pending", submittedAt: new Date().toISOString(), remark, attachment, noAttachmentReason } };
-    });
+    const k = key(empId, goal.id, taskId);
+    const cur = goalRecords[k] || defaultRecord();
+    let attachmentPath = cur.attachment || null;
+    if (attachment && attachment.file) {
+      const path = `${session?.companyId || "unassigned"}/${empId}/${goal.id}-${taskId}/${Date.now()}-${attachment.file.name}`;
+      const { error: uploadError } = await supabaseClient.storage.from("task-attachments").upload(path, attachment.file);
+      if (uploadError) {
+        console.error("Failed to upload attachment:", uploadError);
+        notify("Couldn't upload the attachment — please try again.");
+        return;
+      }
+      attachmentPath = path;
+    } else if (attachment === null) {
+      attachmentPath = null;
+    }
+    const merged = { ...cur, done: true, approval: "pending", submittedAt: new Date().toISOString(), remark, attachment: attachmentPath, noAttachmentReason };
+    setGoalRecords((prev) => ({ ...prev, [k]: merged }));
+    persistRecord(empId, goal.id, taskId, merged);
   };
 
   // Approve with (possibly partial) points. No "reject" — un-tick is the only other action.
@@ -520,38 +638,37 @@ function KPIApp() {
     const goal = goals.find((g) => g.id === goalId);
     const task = goal?.tasks.find((t) => t.id === taskId);
     const rec = getRecord(empId, goalId, taskId);
-    setGoalRecords((prev) => {
-      const k = key(empId, goalId, taskId);
-      const cur = prev[k] || defaultRecord();
-      return { ...prev, [k]: { ...cur, approval: "approved", awardedPoints: awardedPoints ?? cur.awardedPoints ?? 0, awardedWeight: task ? task.weight : cur.awardedWeight } };
-    });
+    const k = key(empId, goalId, taskId);
+    const merged = { ...rec, approval: "approved", awardedPoints: awardedPoints ?? rec.awardedPoints ?? 0, awardedWeight: task ? task.weight : rec.awardedWeight };
+    setGoalRecords((prev) => ({ ...prev, [k]: merged }));
+    persistRecord(empId, goalId, taskId, merged);
     if (task) addNotification(empId, `"${task.text}" was approved for ${awardedPoints ?? task.weight}/${task.weight} pts${rec.adminRemark ? ` — ${rec.adminRemark}` : ""}`, false);
   };
 
   // Staff's own remark on their submission — admin can view this but never edit it.
   const setRemark = (empId, goalId, taskId, remark) => {
-    setGoalRecords((prev) => {
-      const k = key(empId, goalId, taskId);
-      const cur = prev[k] || defaultRecord();
-      return { ...prev, [k]: { ...cur, remark } };
-    });
+    const k = key(empId, goalId, taskId);
+    const cur = goalRecords[k] || defaultRecord();
+    const merged = { ...cur, remark };
+    setGoalRecords((prev) => ({ ...prev, [k]: merged }));
+    persistRecord(empId, goalId, taskId, merged);
   };
 
   // Admin's own note to the staff member — separate field, never overwrites the staff's remark.
   const setAdminRemark = (empId, goalId, taskId, adminRemark) => {
-    setGoalRecords((prev) => {
-      const k = key(empId, goalId, taskId);
-      const cur = prev[k] || defaultRecord();
-      return { ...prev, [k]: { ...cur, adminRemark } };
-    });
+    const k = key(empId, goalId, taskId);
+    const cur = goalRecords[k] || defaultRecord();
+    const merged = { ...cur, adminRemark };
+    setGoalRecords((prev) => ({ ...prev, [k]: merged }));
+    persistRecord(empId, goalId, taskId, merged);
   };
 
   const setAttachment = (empId, goalId, taskId, attachment) => {
-    setGoalRecords((prev) => {
-      const k = key(empId, goalId, taskId);
-      const cur = prev[k] || defaultRecord();
-      return { ...prev, [k]: { ...cur, attachment, noAttachmentReason: attachment ? false : cur.noAttachmentReason } };
-    });
+    const k = key(empId, goalId, taskId);
+    const cur = goalRecords[k] || defaultRecord();
+    const merged = { ...cur, attachment, noAttachmentReason: attachment ? false : cur.noAttachmentReason };
+    setGoalRecords((prev) => ({ ...prev, [k]: merged }));
+    persistRecord(empId, goalId, taskId, merged);
   };
 
   const employeeGoals = (empId) => goals.filter((g) => g.active !== false && g.assignedEmployeeIds.includes(empId));
@@ -602,43 +719,121 @@ function KPIApp() {
     return capacity > 0 ? Math.round((awardedSum / capacity) * 1000) / 10 : 0;
   };
 
-  const addGoal = (deptId, name, description, startDate, endDate, reviewCutoffDate, tasks, assignedEmployeeIds, opts) => {
+  // Creates the goal row, its tasks, and its assignments in Supabase (in that order, since tasks/assignments
+  // need the real goal id), then reflects the real DB-generated ids into local state once done.
+  const addGoal = async (deptId, name, description, startDate, endDate, reviewCutoffDate, tasks, assignedEmployeeIds, opts) => {
     const isAnnual = !!(opts && opts.isAnnual);
     const isCore = !!(opts && opts.isCore);
+    const reviewCutoffOffsetDays = isAnnual ? (opts.reviewCutoffOffsetDays ?? 5) : null;
+    const { data: goalRow, error: goalError } = await supabaseClient.from("goals").insert({
+      dept_id: deptId, name, description: description || null,
+      is_team_goal: isCore, auto_assign_whole_dept: false, is_annual: isAnnual, active: true,
+      start_date: startDate, end_date: endDate,
+      review_cutoff_date: isAnnual ? null : reviewCutoffDate,
+      review_cutoff_offset_days: reviewCutoffOffsetDays,
+      // Bookkeeping for the server-side monthly rollover job — which real-world month this goal's
+      // live goal_tasks/goal_assignments currently represent. The frontend itself never reads this;
+      // it always treats "live" as simply today's calendar month and trusts the rollover job to have
+      // kept goal_tasks/goal_assignments in sync before then.
+      live_month: isAnnual ? currentIsoMonth() : null,
+    }).select().single();
+    if (goalError || !goalRow) { console.error("Failed to create goal:", goalError); return; }
+
+    const taskRows = tasks.map((t, i) => ({
+      goal_id: goalRow.id, text: t.text, weight: t.weight,
+      requires_attachment: !!t.requiresAttachment, requires_remark: !!t.requiresRemark, sort_order: i,
+    }));
+    let insertedTasks = [];
+    if (taskRows.length) {
+      const { data, error } = await supabaseClient.from("goal_tasks").insert(taskRows).select();
+      if (error) console.error("Failed to create goal tasks:", error);
+      insertedTasks = data || [];
+    }
+
+    if (assignedEmployeeIds.length) {
+      const { error } = await supabaseClient.from("goal_assignments").insert(
+        assignedEmployeeIds.map((employeeId) => ({ goal_id: goalRow.id, employee_id: employeeId }))
+      );
+      if (error) console.error("Failed to create goal assignments:", error);
+    }
+
     setGoals((prev) => [...prev, {
-      id: nextId("goal"), deptId, name, description, isTeamGoal: isCore, autoAssignWholeDept: false, isAnnual, active: true, startDate, endDate,
+      id: goalRow.id, deptId, name, description: description || "", isTeamGoal: isCore, autoAssignWholeDept: false, isAnnual, active: true, startDate, endDate,
       reviewCutoffDate: isAnnual ? undefined : reviewCutoffDate,
-      reviewCutoffOffsetDays: isAnnual ? (opts.reviewCutoffOffsetDays ?? 5) : undefined,
-      tasks: tasks.map((t) => ({ id: nextId("task"), text: t.text, weight: t.weight, requiresAttachment: !!t.requiresAttachment, requiresRemark: !!t.requiresRemark })),
+      reviewCutoffOffsetDays: isAnnual ? reviewCutoffOffsetDays : undefined,
+      tasks: insertedTasks.map((t) => ({ id: t.id, text: t.text, weight: Number(t.weight), requiresAttachment: !!t.requires_attachment, requiresRemark: !!t.requires_remark })),
       assignedEmployeeIds,
-      monthlyHistory: isAnnual ? {} : undefined,
-      futureVersions: isAnnual ? [] : undefined,
+      monthlyHistory: {},
+      futureVersions: [],
     }]);
   };
-  const updateGoal = (goalId, patch) => setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, ...patch } : g));
+
+  // camelCase local field -> snake_case Supabase column, for the plain-patch goal fields updateGoal handles.
+  const GOAL_FIELD_MAP = { name: "name", description: "description", startDate: "start_date", endDate: "end_date", reviewCutoffDate: "review_cutoff_date", reviewCutoffOffsetDays: "review_cutoff_offset_days", active: "active" };
+  const updateGoal = (goalId, patch) => {
+    setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, ...patch } : g));
+    const dbPatch = {};
+    Object.keys(patch).forEach((k) => { if (GOAL_FIELD_MAP[k]) dbPatch[GOAL_FIELD_MAP[k]] = patch[k]; });
+    if (Object.keys(dbPatch).length) {
+      supabaseClient.from("goals").update(dbPatch).eq("id", goalId).then(({ error }) => { if (error) console.error("Failed to update goal:", error); });
+    }
+  };
   // Soft delete — archived goals disappear from normal admin/staff views but stay intact for historical reports.
-  const archiveGoal = (goalId) => setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, active: false } : g));
-  const restoreGoal = (goalId) => setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, active: true } : g));
-  const addTaskToGoal = (goalId, text, weight, requiresAttachment, requiresRemark) => {
-    setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, tasks: [...g.tasks, { id: nextId("task"), text, weight, requiresAttachment: !!requiresAttachment, requiresRemark: !!requiresRemark }] } : g));
+  const archiveGoal = (goalId) => {
+    setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, active: false } : g));
+    supabaseClient.from("goals").update({ active: false }).eq("id", goalId).then(({ error }) => { if (error) console.error("Failed to archive goal:", error); });
+  };
+  const restoreGoal = (goalId) => {
+    setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, active: true } : g));
+    supabaseClient.from("goals").update({ active: true }).eq("id", goalId).then(({ error }) => { if (error) console.error("Failed to restore goal:", error); });
+  };
+  const addTaskToGoal = async (goalId, text, weight, requiresAttachment, requiresRemark) => {
     const goal = goals.find((g) => g.id === goalId);
+    const { data: taskRow, error } = await supabaseClient.from("goal_tasks").insert({
+      goal_id: goalId, text, weight, requires_attachment: !!requiresAttachment, requires_remark: !!requiresRemark,
+      sort_order: goal ? goal.tasks.length : 0,
+    }).select().single();
+    if (error || !taskRow) { console.error("Failed to add task:", error); return; }
+    setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, tasks: [...g.tasks, { id: taskRow.id, text, weight, requiresAttachment: !!requiresAttachment, requiresRemark: !!requiresRemark }] } : g));
     if (goal && !isGoalLocked(goal)) goal.assignedEmployeeIds.forEach((empId) => addNotification(empId, `New task added to "${goal.name}": ${text}`, true));
   };
-  const removeTaskFromGoal = (goalId, taskId) => setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, tasks: g.tasks.filter((t) => t.id !== taskId) } : g));
+  const removeTaskFromGoal = (goalId, taskId) => {
+    setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, tasks: g.tasks.filter((t) => t.id !== taskId) } : g));
+    supabaseClient.from("goal_tasks").delete().eq("id", taskId).then(({ error }) => { if (error) console.error("Failed to remove task:", error); });
+  };
   const updateTaskWeight = (goalId, taskId, weight) => {
     setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, tasks: g.tasks.map((t) => t.id === taskId ? { ...t, weight } : t) } : g));
+    supabaseClient.from("goal_tasks").update({ weight }).eq("id", taskId).then(({ error }) => { if (error) console.error("Failed to update task weight:", error); });
     const goal = goals.find((g) => g.id === goalId);
     const task = goal?.tasks.find((t) => t.id === taskId);
     if (goal && task && !isGoalLocked(goal)) goal.assignedEmployeeIds.forEach((empId) => addNotification(empId, `Points changed for "${task.text}" in "${goal.name}" (now ${weight} pts)`, true));
   };
-  const updateTaskRequiresAttachment = (goalId, taskId, requiresAttachment) => setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, tasks: g.tasks.map((t) => t.id === taskId ? { ...t, requiresAttachment } : t) } : g));
-  const updateTaskRequiresRemark = (goalId, taskId, requiresRemark) => setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, tasks: g.tasks.map((t) => t.id === taskId ? { ...t, requiresRemark } : t) } : g));
-  const updateTaskText = (goalId, taskId, text) => setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, tasks: g.tasks.map((t) => t.id === taskId ? { ...t, text } : t) } : g));
-  const toggleAssignment = (goalId, empId) => setGoals((prev) => prev.map((g) => {
-    if (g.id !== goalId) return g;
-    const has = g.assignedEmployeeIds.includes(empId);
-    return { ...g, assignedEmployeeIds: has ? g.assignedEmployeeIds.filter((id) => id !== empId) : [...g.assignedEmployeeIds, empId] };
-  }));
+  const updateTaskRequiresAttachment = (goalId, taskId, requiresAttachment) => {
+    setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, tasks: g.tasks.map((t) => t.id === taskId ? { ...t, requiresAttachment } : t) } : g));
+    supabaseClient.from("goal_tasks").update({ requires_attachment: requiresAttachment }).eq("id", taskId).then(({ error }) => { if (error) console.error("Failed to update task:", error); });
+  };
+  const updateTaskRequiresRemark = (goalId, taskId, requiresRemark) => {
+    setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, tasks: g.tasks.map((t) => t.id === taskId ? { ...t, requiresRemark } : t) } : g));
+    supabaseClient.from("goal_tasks").update({ requires_remark: requiresRemark }).eq("id", taskId).then(({ error }) => { if (error) console.error("Failed to update task:", error); });
+  };
+  const updateTaskText = (goalId, taskId, text) => {
+    setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, tasks: g.tasks.map((t) => t.id === taskId ? { ...t, text } : t) } : g));
+    supabaseClient.from("goal_tasks").update({ text }).eq("id", taskId).then(({ error }) => { if (error) console.error("Failed to update task:", error); });
+  };
+  const toggleAssignment = (goalId, empId) => {
+    const goal = goals.find((g) => g.id === goalId);
+    const has = !!goal?.assignedEmployeeIds.includes(empId);
+    setGoals((prev) => prev.map((g) => {
+      if (g.id !== goalId) return g;
+      const h = g.assignedEmployeeIds.includes(empId);
+      return { ...g, assignedEmployeeIds: h ? g.assignedEmployeeIds.filter((id) => id !== empId) : [...g.assignedEmployeeIds, empId] };
+    }));
+    if (has) {
+      supabaseClient.from("goal_assignments").delete().eq("goal_id", goalId).eq("employee_id", empId).then(({ error }) => { if (error) console.error("Failed to unassign:", error); });
+    } else {
+      supabaseClient.from("goal_assignments").insert({ goal_id: goalId, employee_id: empId }).then(({ error }) => { if (error) console.error("Failed to assign:", error); });
+    }
+  };
 
   // ---- Annual goal / monthly repeat helpers (pass 2) ----
 
@@ -660,32 +855,89 @@ function KPIApp() {
     return { tasks: goal.tasks, assignedEmployeeIds: goal.assignedEmployeeIds, status: "inherited" };
   };
 
+  // Applies newTasks/newAssignedEmployeeIds to a goal's LIVE goal_tasks/goal_assignments in Supabase,
+  // diffing against what's currently there so records tied to unchanged/edited tasks stay linked —
+  // only genuinely new tasks get inserted, only genuinely removed tasks get deleted. Returns the local
+  // tasks array with real DB ids substituted in for whatever was just inserted.
+  const applyLiveGoalDefinition = async (goal, newTasks, newAssignedEmployeeIds) => {
+    const oldTaskIds = new Set(goal.tasks.map((t) => t.id));
+    const newTaskIds = new Set(newTasks.map((t) => t.id));
+    const toDelete = goal.tasks.filter((t) => !newTaskIds.has(t.id));
+    const toUpdate = newTasks.filter((t) => oldTaskIds.has(t.id));
+    const toInsert = newTasks.filter((t) => !oldTaskIds.has(t.id));
+
+    if (toDelete.length) {
+      const { error } = await supabaseClient.from("goal_tasks").delete().in("id", toDelete.map((t) => t.id));
+      if (error) console.error("Failed to remove tasks:", error);
+    }
+    for (const t of toUpdate) {
+      const { error } = await supabaseClient.from("goal_tasks").update({
+        text: t.text, weight: t.weight, requires_attachment: !!t.requiresAttachment, requires_remark: !!t.requiresRemark,
+      }).eq("id", t.id);
+      if (error) console.error("Failed to update task:", error);
+    }
+    let insertedTasks = [];
+    if (toInsert.length) {
+      const { data, error } = await supabaseClient.from("goal_tasks").insert(toInsert.map((t, i) => ({
+        goal_id: goal.id, text: t.text, weight: t.weight,
+        requires_attachment: !!t.requiresAttachment, requires_remark: !!t.requiresRemark, sort_order: oldTaskIds.size + i,
+      }))).select();
+      if (error) console.error("Failed to add tasks:", error);
+      insertedTasks = data || [];
+    }
+
+    const oldAssigned = new Set(goal.assignedEmployeeIds);
+    const newAssignedSet = new Set(newAssignedEmployeeIds);
+    const toUnassign = [...oldAssigned].filter((id) => !newAssignedSet.has(id));
+    const toAssign = [...newAssignedSet].filter((id) => !oldAssigned.has(id));
+    if (toUnassign.length) {
+      const { error } = await supabaseClient.from("goal_assignments").delete().eq("goal_id", goal.id).in("employee_id", toUnassign);
+      if (error) console.error("Failed to unassign:", error);
+    }
+    if (toAssign.length) {
+      const { error } = await supabaseClient.from("goal_assignments").insert(toAssign.map((employee_id) => ({ goal_id: goal.id, employee_id })));
+      if (error) console.error("Failed to assign:", error);
+    }
+
+    let insertedIdx = 0;
+    const finalTasks = newTasks.map((t) => oldTaskIds.has(t.id) ? t : { ...t, id: insertedTasks[insertedIdx++]?.id || t.id });
+    return { tasks: finalTasks, assignedEmployeeIds: newAssignedEmployeeIds };
+  };
+
   // Commit an edit that affects the LIVE current month. scope: "current" | "currentAndFuture"
   // Nothing is ever wiped: approved records are frozen (awardedWeight locked in at approval time,
   // immune to later edits) and pending/untouched records simply get judged against whatever the task's
   // current definition is whenever admin reviews them — their tick/remark/attachment stays intact either way.
-  const commitCurrentMonthEdit = (goalId, newTasks, newAssignedEmployeeIds, scope) => {
+  const commitCurrentMonthEdit = async (goalId, newTasks, newAssignedEmployeeIds, scope) => {
     const goal = goals.find((g) => g.id === goalId);
     if (!goal) return;
     const oldTasks = goal.tasks;
+    const oldAssigned = goal.assignedEmployeeIds;
     const cur = currentIsoMonth();
     const nxt = nextIsoMonth(cur);
 
-    setGoals((prev) => prev.map((g) => {
-      if (g.id !== goalId) return g;
-      let futureVersions = g.futureVersions;
-      if (scope === "current") {
-        // one-month-only override: schedule a revert back to the old definition starting next month,
-        // unless something is already explicitly scheduled from next month onward.
-        const alreadyScheduledAhead = futureVersions.some((v) => v.effectiveFromMonth >= nxt);
-        if (!alreadyScheduledAhead) {
-          futureVersions = [...futureVersions, { effectiveFromMonth: nxt, tasks: oldTasks, assignedEmployeeIds: g.assignedEmployeeIds }];
-        }
-      }
-      return { ...g, tasks: newTasks, assignedEmployeeIds: newAssignedEmployeeIds, futureVersions };
-    }));
+    const { tasks: finalTasks, assignedEmployeeIds: finalAssigned } = await applyLiveGoalDefinition(goal, newTasks, newAssignedEmployeeIds);
 
-    const affected = new Set([...goal.assignedEmployeeIds, ...newAssignedEmployeeIds]);
+    let futureVersions = goal.futureVersions;
+    if (scope === "current") {
+      // one-month-only override: schedule a revert back to the old definition starting next month,
+      // unless something is already explicitly scheduled from next month onward.
+      const alreadyScheduledAhead = futureVersions.some((v) => v.effectiveFromMonth >= nxt);
+      if (!alreadyScheduledAhead) {
+        const revertEntry = { effectiveFromMonth: nxt, tasks: oldTasks, assignedEmployeeIds: oldAssigned };
+        futureVersions = [...futureVersions, revertEntry];
+        const { error } = await supabaseClient.from("goal_future_versions").upsert({
+          goal_id: goalId, effective_from_month: nxt,
+          tasks_snapshot: oldTasks.map((t) => ({ text: t.text, weight: t.weight, requiresAttachment: t.requiresAttachment, requiresRemark: t.requiresRemark })),
+          assigned_snapshot: oldAssigned,
+        }, { onConflict: "goal_id,effective_from_month" });
+        if (error) console.error("Failed to schedule revert:", error);
+      }
+    }
+
+    setGoals((prev) => prev.map((g) => g.id === goalId ? { ...g, tasks: finalTasks, assignedEmployeeIds: finalAssigned, futureVersions } : g));
+
+    const affected = new Set([...oldAssigned, ...finalAssigned]);
     affected.forEach((empId) => addNotification(empId, `"${goal.name}" was updated for ${monthLabel(cur)} — check your goals for what changed. Anything already approved keeps its original points.`, true));
     notify(`Changes applied to ${monthLabel(cur)}${scope === "current" ? " only — reverts automatically next month" : " and every month after, until changed again"}. Approved work is unaffected.`);
   };
@@ -700,6 +952,11 @@ function KPIApp() {
       const futureVersions = existingIdx >= 0 ? g.futureVersions.map((v, i) => i === existingIdx ? entry : v) : [...g.futureVersions, entry];
       return { ...g, futureVersions };
     }));
+    supabaseClient.from("goal_future_versions").upsert({
+      goal_id: goalId, effective_from_month: isoMonth,
+      tasks_snapshot: newTasks.map((t) => ({ text: t.text, weight: t.weight, requiresAttachment: t.requiresAttachment, requiresRemark: t.requiresRemark })),
+      assigned_snapshot: newAssignedEmployeeIds,
+    }, { onConflict: "goal_id,effective_from_month" }).then(({ error }) => { if (error) console.error("Failed to schedule change:", error); });
     if (goal) newAssignedEmployeeIds.forEach((empId) => addNotification(empId, `"${goal.name}" has scheduled changes for ${monthLabel(isoMonth)}.`, false));
     notify(`Scheduled changes for ${monthLabel(isoMonth)}.`);
   };
@@ -1256,12 +1513,21 @@ function TaskRow({ task, goal, employee, colors, locked, rec, toggleTask, submit
   const [wobble, setWobble] = useState(false);
   const [warning, setWarning] = useState("");
 
+  // Keep the raw File on the draft (for the actual upload on submit) alongside a local data-URL just
+  // for the instant thumbnail preview here — the data URL itself is never sent to Supabase.
   const handleFile = (file) => {
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => { setAttachmentDraft({ name: file.name, dataUrl: reader.result, isImage: file.type.startsWith("image/") }); setNoAttachmentDraft(false); };
+    reader.onload = () => { setAttachmentDraft({ name: file.name, dataUrl: reader.result, isImage: file.type.startsWith("image/"), file }); setNoAttachmentDraft(false); };
     reader.readAsDataURL(file);
   };
+
+  // attachmentDraft is either a fresh pick ({name, dataUrl, isImage, file}, not yet uploaded) or,
+  // if this task already has a saved attachment (e.g. after an admin un-tick), the stored storage
+  // path (a plain string) — normalize both into one shape for display.
+  const draftName = attachmentDraft ? (attachmentDraft.name ?? attachmentFileName(attachmentDraft)) : "";
+  const draftIsImage = attachmentDraft ? (attachmentDraft.isImage ?? attachmentIsImage(attachmentDraft)) : false;
+  const draftPreviewSrc = attachmentDraft && attachmentDraft.dataUrl ? attachmentDraft.dataUrl : null;
 
   const commit = () => {
     const attachmentOk = !task.requiresAttachment || attachmentDraft || (noAttachmentDraft && remarkDraft.trim());
@@ -1325,7 +1591,7 @@ function TaskRow({ task, goal, employee, colors, locked, rec, toggleTask, submit
           )}
           {rec.approval === "pending" && <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full"><CalendarClock size={12} />Awaiting approval</span>}
           {rec.adminRemark && <p className="text-[11px] text-slate-500">Note from admin: {rec.adminRemark}</p>}
-          {rec.attachment && <p className="text-[11px] text-slate-400">📎 {rec.attachment.name}</p>}
+          {rec.attachment && <p className="text-[11px] text-slate-400">📎 {attachmentFileName(rec.attachment)}</p>}
         </div>
       ) : (
         !locked && (
@@ -1340,8 +1606,8 @@ function TaskRow({ task, goal, employee, colors, locked, rec, toggleTask, submit
                 <div className="flex items-center gap-2 flex-wrap">
                   {attachmentDraft ? (
                     <div className="flex items-center gap-1.5 bg-slate-50 rounded-md px-2 py-1 text-[11px]">
-                      {attachmentDraft.isImage && <img src={attachmentDraft.dataUrl} className="w-6 h-6 rounded object-cover" />}
-                      <span className="max-w-[120px] truncate">{attachmentDraft.name}</span>
+                      {draftIsImage && draftPreviewSrc && <img src={draftPreviewSrc} className="w-6 h-6 rounded object-cover" />}
+                      <span className="max-w-[120px] truncate">{draftName}</span>
                       <button onClick={() => setAttachmentDraft(null)} className="text-slate-300 hover:text-rose-500"><XCircle size={12} /></button>
                     </div>
                   ) : (
@@ -1737,6 +2003,11 @@ function Lightbox({ content, onClose }) {
         </div>
         {content.type === "image" ? (
           <img src={content.src} className="w-full rounded-lg object-contain" />
+        ) : content.type === "file" ? (
+          <a href={content.src} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 text-sm text-teal-700 hover:underline">
+            <Upload size={16} />
+            Open "{content.title}" in a new tab
+          </a>
         ) : (
           <p className="text-sm text-slate-700 whitespace-pre-wrap">{content.text}</p>
         )}
@@ -2729,6 +3000,20 @@ function AdminApprovals({ departments, goals, activeCompanyId, switchCompany, co
   const [isoMonth, setIsoMonth] = useState(currentIsoMonth());
   const [lightbox, setLightbox] = useState(null);
 
+  // Attachments live in a private bucket, so there's no permanent public URL to just point <img> at —
+  // fetch a short-lived signed URL right when admin asks to view one.
+  const openAttachment = async (path) => {
+    const { data, error } = await supabaseClient.storage.from("task-attachments").createSignedUrl(path, 300);
+    if (error || !data?.signedUrl) {
+      console.error("Failed to open attachment:", error);
+      notify("Couldn't open that attachment — it may have been removed.");
+      return;
+    }
+    const title = attachmentFileName(path);
+    if (attachmentIsImage(path)) setLightbox({ type: "image", title, src: data.signedUrl });
+    else setLightbox({ type: "file", title, src: data.signedUrl });
+  };
+
   return (
     <div>
       <SectionTitle sub="Review ticked tasks for the selected month. Approve with full or partial points and check what staff submitted — or un-tick if it isn't actually complete.">Approvals</SectionTitle>
@@ -2821,8 +3106,8 @@ function AdminApprovals({ departments, goals, activeCompanyId, switchCompany, co
                         </td>
                         <td className="px-3 py-2.5">
                           {rec.attachment ? (
-                            <button onClick={() => setLightbox({ type: "image", title: rec.attachment.name, src: rec.attachment.dataUrl })}>
-                              {rec.attachment.isImage ? <img src={rec.attachment.dataUrl} className="w-9 h-9 rounded object-cover hover:opacity-80 transition-opacity" /> : <Upload size={16} className="text-slate-400" />}
+                            <button onClick={() => openAttachment(rec.attachment)} title={attachmentFileName(rec.attachment)} className="p-1.5 rounded-md bg-slate-50 text-slate-500 hover:bg-teal-50 hover:text-teal-700 transition-colors">
+                              <Upload size={14} />
                             </button>
                           ) : rec.noAttachmentReason ? (
                             <span className="text-[11px] text-amber-600">No attachment (staff marked N/A)</span>
