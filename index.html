@@ -615,14 +615,19 @@ function KPIApp() {
     const cur = goalRecords[k] || defaultRecord();
     let attachmentPath = cur.attachment || null;
     if (attachment && attachment.file) {
-      const path = `${session?.companyId || "unassigned"}/${empId}/${goal.id}-${taskId}/${Date.now()}-${attachment.file.name}`;
-      const { error: uploadError } = await supabaseClient.storage.from("task-attachments").upload(path, attachment.file);
-      if (uploadError) {
+      // Sanitize the filename (spaces/parentheses/unicode from default screenshot names can end up
+      // encoded differently between the upload call and a later signed-URL lookup) and use the path
+      // Supabase actually confirms it stored the file under (data.path), never our own guess at it —
+      // that's what keeps what we save to goal_records.attachment_url guaranteed to match reality.
+      const safeName = attachment.file.name.replace(/[^a-zA-Z0-9.\-]+/g, "-");
+      const path = `${session?.companyId || "unassigned"}/${empId}/${goal.id}-${taskId}/${Date.now()}-${safeName}`;
+      const { data: uploadData, error: uploadError } = await supabaseClient.storage.from("task-attachments").upload(path, attachment.file);
+      if (uploadError || !uploadData?.path) {
         console.error("Failed to upload attachment:", uploadError);
         notify("Couldn't upload the attachment — please try again.");
         return;
       }
-      attachmentPath = path;
+      attachmentPath = uploadData.path;
     } else if (attachment === null) {
       attachmentPath = null;
     }
@@ -990,34 +995,81 @@ function KPIApp() {
     return capacity > 0 ? Math.round((awardedSum / capacity) * 1000) / 10 : 0;
   };
 
-  const addEmployee = (name, email, role, deptId, password) => {
-    const emp = { id: nextId("emp"), name, email: email.trim().toLowerCase(), password: password || DEMO_PASSWORD, role: role || "staff", deptId, active: true };
+  // Creating an employee needs a real Supabase Auth login (email+password), which the plain anon-key
+  // client can never do — only the service_role key can, and that key must never reach the browser. So
+  // this calls a server-side Edge Function ("create-employee") that does both the auth.users insert and
+  // the employees insert atomically, using the service_role key that lives only in the function's secrets.
+  const addEmployee = async (name, email, role, deptId, password, companyId) => {
+    const { data, error } = await supabaseClient.functions.invoke("create-employee", {
+      body: { name, email: email.trim().toLowerCase(), role: role || "staff", deptId, companyId, password: password || undefined },
+    });
+    if (error || !data?.employee) {
+      console.error("Failed to create employee:", error, data);
+      notify(`Couldn't create ${name} — ${data?.error || error?.message || "unknown error"}`);
+      return null;
+    }
+    const emp = { id: data.employee.id, name: data.employee.name, email: data.employee.email, password: null, role: data.employee.role, deptId: data.employee.dept_id, active: true };
     setEmployees((prev) => [...prev, emp]);
     // Whole-department goals (the auto-generated team scorecard) automatically pick up new hires.
     // Other core goals have their own hand-picked member list and are unaffected.
     setGoals((prev) => prev.map((g) => (g.autoAssignWholeDept && g.deptId === deptId) ? { ...g, assignedEmployeeIds: [...g.assignedEmployeeIds, emp.id] } : g));
     return emp;
   };
-  const updateEmployee = (empId, patch) => setEmployees((prev) => prev.map((e) => e.id === empId ? { ...e, ...patch } : e));
-  const archiveEmployee = (empId) => setEmployees((prev) => prev.map((e) => e.id === empId ? { ...e, active: false } : e));
-  const restoreEmployee = (empId) => setEmployees((prev) => prev.map((e) => e.id === empId ? { ...e, active: true } : e));
+  const updateEmployee = (empId, patch) => {
+    setEmployees((prev) => prev.map((e) => e.id === empId ? { ...e, ...patch } : e));
+    const dbPatch = {};
+    if (patch.name !== undefined) dbPatch.name = patch.name;
+    if (patch.role !== undefined) dbPatch.role = patch.role;
+    if (patch.deptId !== undefined) dbPatch.dept_id = patch.deptId;
+    if (Object.keys(dbPatch).length) supabaseClient.from("employees").update(dbPatch).eq("id", empId).then(({ error }) => { if (error) console.error("Failed to update employee:", error); });
+  };
+  const archiveEmployee = (empId) => {
+    setEmployees((prev) => prev.map((e) => e.id === empId ? { ...e, active: false } : e));
+    supabaseClient.from("employees").update({ active: false }).eq("id", empId).then(({ error }) => { if (error) console.error("Failed to archive employee:", error); });
+  };
+  const restoreEmployee = (empId) => {
+    setEmployees((prev) => prev.map((e) => e.id === empId ? { ...e, active: true } : e));
+    supabaseClient.from("employees").update({ active: true }).eq("id", empId).then(({ error }) => { if (error) console.error("Failed to restore employee:", error); });
+  };
 
-  const addDepartment = (name, colorHex, companyId) => {
-    const dept = { id: nextId("dept"), name, colorHex, companyId, active: true };
+  const addDepartment = async (name, colorHex, companyId) => {
+    const { data, error } = await supabaseClient.from("departments").insert({ name, color_hex: colorHex, company_id: companyId, active: true }).select().single();
+    if (error || !data) { console.error("Failed to create department:", error); notify(`Couldn't create department "${name}".`); return null; }
+    const dept = { id: data.id, name: data.name, colorHex: data.color_hex, companyId: data.company_id, active: true };
     setDepartments((prev) => [...prev, dept]);
     return dept;
   };
-  const archiveDepartment = (deptId) => setDepartments((prev) => prev.map((d) => d.id === deptId ? { ...d, active: false } : d));
-  const restoreDepartment = (deptId) => setDepartments((prev) => prev.map((d) => d.id === deptId ? { ...d, active: true } : d));
+  const archiveDepartment = (deptId) => {
+    setDepartments((prev) => prev.map((d) => d.id === deptId ? { ...d, active: false } : d));
+    supabaseClient.from("departments").update({ active: false }).eq("id", deptId).then(({ error }) => { if (error) console.error("Failed to archive department:", error); });
+  };
+  const restoreDepartment = (deptId) => {
+    setDepartments((prev) => prev.map((d) => d.id === deptId ? { ...d, active: true } : d));
+    supabaseClient.from("departments").update({ active: true }).eq("id", deptId).then(({ error }) => { if (error) console.error("Failed to restore department:", error); });
+  };
 
-  const addCompany = (name, description) => {
-    const company = { id: nextId("co"), name, description: description || "", active: true };
+  const addCompany = async (name, description) => {
+    const { data, error } = await supabaseClient.from("companies").insert({ name, description: description || null, active: true }).select().single();
+    if (error || !data) { console.error("Failed to create company:", error); notify(`Couldn't create company "${name}".`); return null; }
+    const company = { id: data.id, name: data.name, description: data.description || "", active: true };
     setCompanies((prev) => [...prev, company]);
     return company;
   };
-  const updateCompany = (companyId, patch) => setCompanies((prev) => prev.map((c) => c.id === companyId ? { ...c, ...patch } : c));
-  const archiveCompany = (companyId) => setCompanies((prev) => prev.map((c) => c.id === companyId ? { ...c, active: false } : c));
-  const restoreCompany = (companyId) => setCompanies((prev) => prev.map((c) => c.id === companyId ? { ...c, active: true } : c));
+  const updateCompany = (companyId, patch) => {
+    setCompanies((prev) => prev.map((c) => c.id === companyId ? { ...c, ...patch } : c));
+    const dbPatch = {};
+    if (patch.name !== undefined) dbPatch.name = patch.name;
+    if (patch.description !== undefined) dbPatch.description = patch.description;
+    if (Object.keys(dbPatch).length) supabaseClient.from("companies").update(dbPatch).eq("id", companyId).then(({ error }) => { if (error) console.error("Failed to update company:", error); });
+  };
+  const archiveCompany = (companyId) => {
+    setCompanies((prev) => prev.map((c) => c.id === companyId ? { ...c, active: false } : c));
+    supabaseClient.from("companies").update({ active: false }).eq("id", companyId).then(({ error }) => { if (error) console.error("Failed to archive company:", error); });
+  };
+  const restoreCompany = (companyId) => {
+    setCompanies((prev) => prev.map((c) => c.id === companyId ? { ...c, active: true } : c));
+    supabaseClient.from("companies").update({ active: true }).eq("id", companyId).then(({ error }) => { if (error) console.error("Failed to restore company:", error); });
+  };
 
   const findEmployeeByEmail = (email) => employees.find((e) => e.email && e.email.trim().toLowerCase() === email.trim().toLowerCase());
 
@@ -2421,9 +2473,13 @@ function AddEmployeeForm({ departments, companies, activeCompanyId, activeDeptId
     setDeptId(firstDept?.id || "");
   };
 
-  const submit = () => {
-    if (!name.trim() || !email.trim() || !password.trim() || !deptId) return;
-    addEmployee(name.trim(), email.trim(), role, deptId, password.trim());
+  const [saving, setSaving] = useState(false);
+  const submit = async () => {
+    if (!name.trim() || !email.trim() || !password.trim() || !deptId || saving) return;
+    setSaving(true);
+    const emp = await addEmployee(name.trim(), email.trim(), role, deptId, password.trim(), companyId);
+    setSaving(false);
+    if (!emp) return; // addEmployee already showed the error via notify()
     notify(`Added ${name.trim()} (${email.trim()})`);
     setName(""); setEmail(""); setPassword("");
     onDone();
@@ -2463,7 +2519,7 @@ function AddEmployeeForm({ departments, companies, activeCompanyId, activeDeptId
         <input type="text" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Set an initial password" className="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm" />
       </div>
       <div className="flex gap-2">
-        <button onClick={submit} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium">Create account</button>
+        <button onClick={submit} disabled={saving} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium disabled:opacity-50">{saving ? "Creating…" : "Create account"}</button>
         <button onClick={onDone} className="px-4 py-2 rounded-lg border border-slate-200 text-slate-600 text-sm font-medium">Cancel</button>
       </div>
     </div>
