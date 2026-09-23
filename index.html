@@ -1004,8 +1004,15 @@ function KPIApp() {
       body: { name, email: email.trim().toLowerCase(), role: role || "staff", deptId, companyId, password: password || undefined },
     });
     if (error || !data?.employee) {
-      console.error("Failed to create employee:", error, data);
-      notify(`Couldn't create ${name} — ${data?.error || error?.message || "unknown error"}`);
+      // supabase-js only puts a generic "non-2xx status code" message on `error` itself for a
+      // failed function call — the function's own detailed { error: "..." } JSON body (which is
+      // what actually explains what went wrong) has to be read separately off error.context.
+      let detail = data?.error || error?.message || "unknown error";
+      if (error?.context && typeof error.context.json === "function") {
+        try { const body = await error.context.clone().json(); if (body?.error) detail = body.error; } catch {}
+      }
+      console.error("Failed to create employee:", detail, error, data);
+      notify(`Couldn't create ${name} — ${detail}`);
       return null;
     }
     const emp = { id: data.employee.id, name: data.employee.name, email: data.employee.email, password: null, role: data.employee.role, deptId: data.employee.dept_id, active: true };
