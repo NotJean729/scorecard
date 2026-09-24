@@ -1111,14 +1111,36 @@ function KPIApp() {
       }
     }
 
+    // Two providers, tried in order: Nominatim gives the best formatted address, but browsers can't set
+    // the identifying header its usage policy asks for, so it sometimes silently returns no address
+    // (not an error — just an empty result) instead of throwing. BigDataCloud's "reverse-geocode-client"
+    // endpoint exists specifically for calling straight from a browser/app with no key and no such
+    // restriction, so it's the fallback if Nominatim comes back empty.
     let address = null;
     if (record.lat != null && record.lng != null) {
       try {
-        const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${record.lat}&lon=${record.lng}`);
+        const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${record.lat}&lon=${record.lng}&addressdetails=1`, {
+          headers: { "Accept-Language": "en" },
+        });
         const geo = await res.json();
-        address = geo?.display_name || null;
+        if (geo?.display_name) {
+          address = geo.display_name;
+        } else {
+          console.warn("Nominatim returned no address, trying fallback provider. Response:", geo);
+        }
       } catch (e) {
-        console.error("Reverse geocoding failed:", e);
+        console.error("Nominatim reverse geocoding failed, trying fallback provider:", e);
+      }
+      if (!address) {
+        try {
+          const res = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${record.lat}&longitude=${record.lng}&localityLanguage=en`);
+          const geo = await res.json();
+          const parts = [geo?.locality, geo?.city, geo?.principalSubdivision, geo?.postcode, geo?.countryName].filter(Boolean);
+          if (parts.length) address = parts.join(", ");
+          else console.warn("Fallback provider also returned no address. Response:", geo);
+        } catch (e) {
+          console.error("Fallback reverse geocoding also failed:", e);
+        }
       }
     }
 
@@ -1836,6 +1858,11 @@ function StaffCheckin({ employee, dept, colors, checkins, addCheckin }) {
   const [camError, setCamError] = useState("");
   const [checkingOut, setCheckingOut] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  // React state updates aren't applied synchronously, so a genuinely fast double-click can still fire
+  // twice before a re-render disables the button. Refs update immediately, so they're the real guard;
+  // the state above is only for what the button visually shows.
+  const checkingOutRef = useRef(false);
+  const confirmingRef = useRef(false);
   const videoRef = useRef(null);
   const streamRef = useRef(null);
 
@@ -1871,11 +1898,12 @@ function StaffCheckin({ employee, dept, colors, checkins, addCheckin }) {
   };
 
   const checkOut = () => {
-    if (checkingOut) return; // guard against a rapid double-click firing two inserts
+    if (checkingOutRef.current) return; // synchronous guard — catches even a same-tick double-click
+    checkingOutRef.current = true;
     setCheckingOut(true);
     const finish = (loc) => {
       Promise.resolve(addCheckin({ id: `ci-${Date.now()}`, empId: employee.id, deptId: dept.id, type: "out", timestamp: new Date().toISOString(), lat: loc?.lat ?? null, lng: loc?.lng ?? null, photo: null, elapsedSec: 0, withinWindow: true }))
-        .finally(() => setCheckingOut(false));
+        .finally(() => { checkingOutRef.current = false; setCheckingOut(false); });
     };
     if (!navigator.geolocation) { finish(null); return; }
     navigator.geolocation.getCurrentPosition((pos) => finish({ lat: pos.coords.latitude, lng: pos.coords.longitude }), () => finish(null));
@@ -1903,11 +1931,12 @@ function StaffCheckin({ employee, dept, colors, checkins, addCheckin }) {
   };
 
   const confirmCheckin = () => {
-    if (confirming) return; // guard against a rapid double-click firing two inserts
+    if (confirmingRef.current) return; // synchronous guard — catches even a same-tick double-click
+    confirmingRef.current = true;
     setConfirming(true);
     const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
     Promise.resolve(addCheckin({ id: `ci-${Date.now()}`, empId: employee.id, deptId: dept.id, type: "in", timestamp: new Date().toISOString(), lat: location?.lat ?? null, lng: location?.lng ?? null, photo, elapsedSec, withinWindow: elapsedSec <= 300 }))
-      .finally(() => setConfirming(false));
+      .finally(() => { confirmingRef.current = false; setConfirming(false); });
     setStage("idle"); setLocation(null); setPhoto(null); setStartedAt(null);
   };
 
