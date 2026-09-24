@@ -2103,7 +2103,11 @@ function StaffCheckin({ employee, dept, colors, checkins, addCheckin }) {
         .finally(() => { checkingOutRef.current = false; setCheckingOut(false); });
     };
     if (!navigator.geolocation) { finish(null); return; }
-    navigator.geolocation.getCurrentPosition((pos) => finish({ lat: pos.coords.latitude, lng: pos.coords.longitude }), () => finish(null));
+    navigator.geolocation.getCurrentPosition(
+      (pos) => finish({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      () => finish(null),
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
   };
 
   useEffect(() => {
