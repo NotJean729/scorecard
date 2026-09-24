@@ -17,6 +17,7 @@
 
 <!-- PWA installability -->
 <link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icon-192.png" type="image/png" />
 <meta name="theme-color" content="#0d9488" />
 
 <!-- iOS-specific "Add to Home Screen" tags (Safari doesn't fully rely on manifest.json) -->
@@ -79,6 +80,8 @@ const AlertTriangle = (p) => <IconBase {...p}><path d="M10.29 3.86 1.82 18a2 2 0
 const Mail = (p) => <IconBase {...p}><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></IconBase>;
 const Pencil = (p) => <IconBase {...p}><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></IconBase>;
 const Check = (p) => <IconBase {...p}><polyline points="20 6 9 17 4 12"/></IconBase>;
+const Eye = (p) => <IconBase {...p}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></IconBase>;
+const EyeOff = (p) => <IconBase {...p}><path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a18.4 18.4 0 0 1 5.06-5.94M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></IconBase>;
 const Undo2 = (p) => <IconBase {...p}><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></IconBase>;
 const MessageCircle = (p) => <IconBase {...p}><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 8.5 8.5 0 0 1-4-1L3 21l1.5-5.5A8.38 8.38 0 0 1 3.5 11.5 8.5 8.5 0 1 1 21 11.5z"/></IconBase>;
 const Sliders = (p) => <IconBase {...p}><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></IconBase>;
@@ -384,6 +387,7 @@ function KPIApp() {
   const [session, setSession] = useState(null); // {role, employeeId, name, email, deptId, companyId}
   const [authLoading, setAuthLoading] = useState(true);
   const [dataLoading, setDataLoading] = useState(true);
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
 
   // Look up the employees row for a logged-in Supabase auth user and turn it into our session shape.
   const hydrateSessionFromUser = async (authUser) => {
@@ -418,6 +422,10 @@ function KPIApp() {
     });
     const { data: listener } = supabaseClient.auth.onAuthStateChange((event, authSession) => {
       if (event === "SIGNED_OUT") { setSession(null); return; }
+      // Fired when someone lands here via the "reset your password" email link — they're temporarily
+      // signed in for the sole purpose of setting a new password, so show that screen instead of the
+      // normal app until they've done it.
+      if (event === "PASSWORD_RECOVERY") { setPasswordRecovery(true); setAuthLoading(false); return; }
       if (event === "SIGNED_IN" && authSession && authSession.user) {
         hydrateSessionFromUser(authSession.user);
       }
@@ -1111,25 +1119,24 @@ function KPIApp() {
       }
     }
 
-    // Two providers, tried in order: Nominatim gives the best formatted address, but browsers can't set
-    // the identifying header its usage policy asks for, so it sometimes silently returns no address
-    // (not an error — just an empty result) instead of throwing. BigDataCloud's "reverse-geocode-client"
-    // endpoint exists specifically for calling straight from a browser/app with no key and no such
-    // restriction, so it's the fallback if Nominatim comes back empty.
+    // Reverse geocoding now happens server-side, via the "reverse-geocode" Edge Function — calling
+    // Nominatim directly from the browser was unreliable (it can silently return no address instead of
+    // an error, since browsers can't set the identifying header its usage policy expects). The Edge
+    // Function sets that header properly, which is the actual fix. BigDataCloud's client-safe endpoint
+    // stays as a second-layer fallback in case the Edge Function itself is unreachable.
     let address = null;
     if (record.lat != null && record.lng != null) {
       try {
-        const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${record.lat}&lon=${record.lng}&addressdetails=1`, {
-          headers: { "Accept-Language": "en" },
+        const { data: geoData, error: geoError } = await supabaseClient.functions.invoke("reverse-geocode", {
+          body: { lat: record.lat, lng: record.lng },
         });
-        const geo = await res.json();
-        if (geo?.display_name) {
-          address = geo.display_name;
-        } else {
-          console.warn("Nominatim returned no address, trying fallback provider. Response:", geo);
+        if (geoError) {
+          console.warn("reverse-geocode function unavailable, trying fallback provider:", geoError);
+        } else if (geoData?.address) {
+          address = geoData.address;
         }
       } catch (e) {
-        console.error("Nominatim reverse geocoding failed, trying fallback provider:", e);
+        console.warn("reverse-geocode function call failed, trying fallback provider:", e);
       }
       if (!address) {
         try {
@@ -1285,6 +1292,15 @@ function KPIApp() {
     );
   }
 
+  if (passwordRecovery) {
+    return (
+      <div className="min-h-full bg-slate-50 font-sans">
+        <style>{FONT_STYLE}</style>
+        <SetNewPasswordScreen onDone={() => setPasswordRecovery(false)} />
+      </div>
+    );
+  }
+
   if (!session) {
     return (
       <div className="min-h-full bg-slate-50 font-sans">
@@ -1340,8 +1356,26 @@ function KPIApp() {
 function LoginScreen({ onLogin }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [mode, setMode] = useState("login"); // login | forgot
+  const [resetEmail, setResetEmail] = useState("");
+  const [resetError, setResetError] = useState("");
+  const [resetSent, setResetSent] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
+
+  const sendResetLink = async () => {
+    setResetError("");
+    if (!resetEmail.trim()) { setResetError("Enter your email."); return; }
+    setResetBusy(true);
+    const { error: resetErr } = await supabaseClient.auth.resetPasswordForEmail(resetEmail.trim(), {
+      redirectTo: window.location.href.split("#")[0].split("?")[0],
+    });
+    setResetBusy(false);
+    if (resetErr) { setResetError(resetErr.message); return; }
+    setResetSent(true);
+  };
 
   const submit = async () => {
     setError("");
@@ -1386,40 +1420,134 @@ function LoginScreen({ onLogin }) {
     <div className="min-h-screen flex items-center justify-center px-6">
       <div className="w-full max-w-sm">
         <div className="flex items-center gap-2 mb-8 justify-center">
-          <div className="w-9 h-9 rounded-lg bg-teal-600 flex items-center justify-center">
-            <ClipboardList className="text-white" size={18} />
-          </div>
+          <img src="icon-192.png" alt="Scorecard" className="w-9 h-9 rounded-lg" />
           <span className="font-display font-semibold text-xl tracking-tight">Scorecard</span>
         </div>
 
+        {mode === "login" ? (
+          <div className="bg-white rounded-xl border border-slate-200 p-6">
+            <label className="block text-xs font-medium text-slate-500 mb-1.5">Email</label>
+            <input
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && submit()}
+              placeholder="you@company.com"
+              className="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-teal-600"
+            />
+            <label className="block text-xs font-medium text-slate-500 mb-1.5">Password</label>
+            <div className="relative mb-1.5">
+              <input
+                type={showPassword ? "text" : "password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && submit()}
+                placeholder="••••••••"
+                className="w-full px-3 py-2.5 pr-10 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-600"
+              />
+              <button type="button" onClick={() => setShowPassword((s) => !s)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
+            </div>
+            <button type="button" onClick={() => { setMode("forgot"); setResetEmail(email); setResetSent(false); setResetError(""); }} className="text-[11px] text-teal-700 hover:underline mb-4 block">
+              Forgot password?
+            </button>
+
+            {error && <p className="text-xs text-rose-500 mb-3">{error}</p>}
+
+            <button onClick={submit} disabled={busy} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-700 transition-colors disabled:opacity-60">
+              <LogIn size={15} />
+              {busy ? "Signing in…" : "Log in"}
+            </button>
+            <p className="text-[11px] text-slate-400 mt-3 text-center">
+              Accounts are created by your admin in People management — you can't self-register.
+            </p>
+          </div>
+        ) : (
+          <div className="bg-white rounded-xl border border-slate-200 p-6">
+            {resetSent ? (
+              <>
+                <p className="text-sm font-semibold text-slate-800 mb-2">Check your email</p>
+                <p className="text-xs text-slate-500 mb-4">If an account exists for {resetEmail.trim()}, a reset link was just sent. Open it on this device to set a new password.</p>
+                <button onClick={() => setMode("login")} className="w-full py-2.5 rounded-lg border border-slate-200 text-slate-600 text-sm font-medium">Back to log in</button>
+              </>
+            ) : (
+              <>
+                <p className="text-sm font-semibold text-slate-800 mb-3">Reset your password</p>
+                <label className="block text-xs font-medium text-slate-500 mb-1.5">Email</label>
+                <input
+                  value={resetEmail}
+                  onChange={(e) => setResetEmail(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && sendResetLink()}
+                  placeholder="you@company.com"
+                  className="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-teal-600"
+                />
+                {resetError && <p className="text-xs text-rose-500 mb-3">{resetError}</p>}
+                <button onClick={sendResetLink} disabled={resetBusy} className="w-full py-2.5 rounded-lg bg-slate-900 text-white text-sm font-medium disabled:opacity-60 mb-2">
+                  {resetBusy ? "Sending…" : "Send reset link"}
+                </button>
+                <button onClick={() => setMode("login")} className="w-full py-2 text-xs text-slate-500">Back to log in</button>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Shown after someone clicks a "reset your password" email link — Supabase signs them in just enough
+// to set a new password, and this is where they do that.
+function SetNewPasswordScreen({ onDone }) {
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setError("");
+    if (newPassword.length < 6) { setError("Password must be at least 6 characters."); return; }
+    if (newPassword !== confirmPassword) { setError("Passwords don't match."); return; }
+    setBusy(true);
+    const { error: updateError } = await supabaseClient.auth.updateUser({ password: newPassword });
+    setBusy(false);
+    if (updateError) { setError(updateError.message); return; }
+    onDone();
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center px-6">
+      <div className="w-full max-w-sm">
+        <div className="flex items-center gap-2 mb-8 justify-center">
+          <img src="icon-192.png" alt="Scorecard" className="w-9 h-9 rounded-lg" />
+          <span className="font-display font-semibold text-xl tracking-tight">Scorecard</span>
+        </div>
         <div className="bg-white rounded-xl border border-slate-200 p-6">
-          <label className="block text-xs font-medium text-slate-500 mb-1.5">Email</label>
+          <p className="text-sm font-semibold text-slate-800 mb-3">Set a new password</p>
+          <label className="block text-xs font-medium text-slate-500 mb-1.5">New password</label>
+          <div className="relative mb-3">
+            <input
+              type={showPassword ? "text" : "password"}
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              className="w-full px-3 py-2.5 pr-10 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-600"
+            />
+            <button type="button" onClick={() => setShowPassword((s) => !s)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+              {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+            </button>
+          </div>
+          <label className="block text-xs font-medium text-slate-500 mb-1.5">Confirm new password</label>
           <input
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            type={showPassword ? "text" : "password"}
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && submit()}
-            placeholder="you@company.com"
             className="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-teal-600"
           />
-          <label className="block text-xs font-medium text-slate-500 mb-1.5">Password</label>
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && submit()}
-            placeholder="••••••••"
-            className="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-teal-600"
-          />
-
           {error && <p className="text-xs text-rose-500 mb-3">{error}</p>}
-
-          <button onClick={submit} disabled={busy} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-700 transition-colors disabled:opacity-60">
-            <LogIn size={15} />
-            {busy ? "Signing in…" : "Log in"}
+          <button onClick={submit} disabled={busy} className="w-full py-2.5 rounded-lg bg-slate-900 text-white text-sm font-medium disabled:opacity-60">
+            {busy ? "Saving…" : "Set password & continue"}
           </button>
-          <p className="text-[11px] text-slate-400 mt-3 text-center">
-            Accounts are created by your admin in People management — you can't self-register.
-          </p>
         </div>
       </div>
     </div>
@@ -1430,6 +1558,7 @@ function LoginScreen({ onLogin }) {
 
 function TopBar({ session, onLogout, notifications, markNotificationsRead }) {
   const [open, setOpen] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(false);
   const mine = notifications.filter((n) => n.empId === session.employeeId || (session.role === "ceo" && n.empId === "admin"));
   const unread = mine.filter((n) => !n.read).length;
 
@@ -1437,9 +1566,7 @@ function TopBar({ session, onLogout, notifications, markNotificationsRead }) {
     <div className="border-b border-slate-200 bg-white sticky top-0 z-20">
       <div className="max-w-6xl mx-auto px-6 py-3.5 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-md bg-teal-600 flex items-center justify-center">
-            <ClipboardList className="text-white" size={15} />
-          </div>
+          <img src="icon-192.png" alt="Scorecard" className="w-7 h-7 rounded-md" />
           <span className="font-display font-semibold tracking-tight">Scorecard</span>
         </div>
         <div className="flex items-center gap-3">
@@ -1475,11 +1602,81 @@ function TopBar({ session, onLogout, notifications, markNotificationsRead }) {
           <span className="text-sm text-slate-500">
             {session.name} <span className="text-slate-300">·</span> <span className="font-medium text-slate-700">{session.role === "ceo" ? "CEO / Admin" : "Staff"}</span>
           </span>
+          <button onClick={() => setChangingPassword(true)} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium text-slate-500 hover:bg-slate-100 transition-colors">
+            <Settings size={13} />
+            Change password
+          </button>
           <button onClick={onLogout} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium text-slate-500 hover:bg-slate-100 transition-colors">
             <LogOut size={13} />
             Log out
           </button>
         </div>
+      </div>
+      {changingPassword && <ChangePasswordModal onClose={() => setChangingPassword(false)} />}
+    </div>
+  );
+}
+
+// Self-service password change — anyone signed in can set a new password without needing the old one
+// (Supabase's updateUser just needs a valid active session, which they already have by being logged in).
+function ChangePasswordModal({ onClose }) {
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const submit = async () => {
+    setError("");
+    if (newPassword.length < 6) { setError("Password must be at least 6 characters."); return; }
+    if (newPassword !== confirmPassword) { setError("Passwords don't match."); return; }
+    setBusy(true);
+    const { error: updateError } = await supabaseClient.auth.updateUser({ password: newPassword });
+    setBusy(false);
+    if (updateError) { setError(updateError.message); return; }
+    setDone(true);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center px-6" onClick={onClose}>
+      <div className="bg-white rounded-xl border border-slate-200 p-5 w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
+        {done ? (
+          <>
+            <p className="text-sm font-semibold text-slate-800 mb-2">Password updated</p>
+            <p className="text-xs text-slate-500 mb-4">Use your new password next time you log in.</p>
+            <button onClick={onClose} className="w-full py-2.5 rounded-lg bg-slate-900 text-white text-sm font-medium">Done</button>
+          </>
+        ) : (
+          <>
+            <p className="text-sm font-semibold text-slate-800 mb-3">Change password</p>
+            <label className="block text-xs font-medium text-slate-500 mb-1.5">New password</label>
+            <div className="relative mb-3">
+              <input
+                type={showPassword ? "text" : "password"}
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                className="w-full px-3 py-2.5 pr-10 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-600"
+              />
+              <button type="button" onClick={() => setShowPassword((s) => !s)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
+            </div>
+            <label className="block text-xs font-medium text-slate-500 mb-1.5">Confirm new password</label>
+            <input
+              type={showPassword ? "text" : "password"}
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && submit()}
+              className="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-teal-600"
+            />
+            {error && <p className="text-xs text-rose-500 mb-3">{error}</p>}
+            <div className="flex gap-2">
+              <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-slate-600 text-sm font-medium">Cancel</button>
+              <button onClick={submit} disabled={busy} className="flex-1 py-2.5 rounded-lg bg-slate-900 text-white text-sm font-medium disabled:opacity-60">{busy ? "Saving…" : "Save"}</button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
