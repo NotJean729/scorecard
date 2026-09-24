@@ -436,7 +436,7 @@ function KPIApp() {
     if (!session) { setDataLoading(true); return; }
     let active = true;
     (async () => {
-      const [companiesRes, departmentsRes, employeesRes, goalsRes, tasksRes, assignmentsRes, recordsRes, historyRes, futureRes] = await Promise.all([
+      const [companiesRes, departmentsRes, employeesRes, goalsRes, tasksRes, assignmentsRes, recordsRes, historyRes, futureRes, checkinsRes] = await Promise.all([
         supabaseClient.from("companies").select("*"),
         supabaseClient.from("departments").select("*"),
         supabaseClient.from("employees").select("*"),
@@ -446,6 +446,7 @@ function KPIApp() {
         supabaseClient.from("goal_records").select("*"),
         supabaseClient.from("goal_month_history").select("*"),
         supabaseClient.from("goal_future_versions").select("*"),
+        supabaseClient.from("check_ins").select("*").order("timestamp", { ascending: false }),
       ]);
       if (!active) return;
       if (companiesRes.error) console.error("Failed to load companies:", companiesRes.error);
@@ -457,6 +458,7 @@ function KPIApp() {
       if (recordsRes.error) console.error("Failed to load goal records:", recordsRes.error);
       if (historyRes.error) console.error("Failed to load goal month history:", historyRes.error);
       if (futureRes.error) console.error("Failed to load goal future versions:", futureRes.error);
+      if (checkinsRes.error) console.error("Failed to load check-ins:", checkinsRes.error);
 
       setCompanies((companiesRes.data || []).map((c) => ({
         id: c.id, name: c.name, active: c.active !== false,
@@ -529,6 +531,12 @@ function KPIApp() {
         };
       });
       setGoalRecords(mappedRecords);
+
+      setCheckins((checkinsRes.data || []).map((c) => ({
+        id: c.id, empId: c.employee_id, deptId: c.dept_id, type: c.type, timestamp: c.timestamp,
+        lat: c.lat, lng: c.lng, photo: c.photo_url, elapsedSec: c.elapsed_sec,
+        withinWindow: c.within_window, address: c.address || null,
+      })));
 
       setDataLoading(false);
     })();
@@ -1080,7 +1088,62 @@ function KPIApp() {
 
   const findEmployeeByEmail = (email) => employees.find((e) => e.email && e.email.trim().toLowerCase() === email.trim().toLowerCase());
 
-  const addCheckin = (record) => setCheckins((prev) => [record, ...prev]);
+  // Check-ins are now real: the photo (captured as a data URL by the camera) goes to the private
+  // "checkin-photos" bucket instead of being stored inline, and lat/lng get reverse-geocoded into a
+  // human-readable address (via OpenStreetMap's free Nominatim API — no key needed) before saving.
+  // Both are best-effort: if the photo upload or geocoding fails, the check-in itself still saves.
+  const addCheckin = async (record) => {
+    let photoPath = null;
+    if (record.photo) {
+      try {
+        const blob = await (await fetch(record.photo)).blob();
+        const path = `${session?.companyId || "unassigned"}/${record.empId}/${Date.now()}-checkin.jpg`;
+        const { data: uploadData, error: uploadError } = await supabaseClient.storage
+          .from("checkin-photos")
+          .upload(path, blob, { contentType: "image/jpeg" });
+        if (uploadError || !uploadData?.path) {
+          console.error("Failed to upload check-in photo:", uploadError);
+        } else {
+          photoPath = uploadData.path;
+        }
+      } catch (e) {
+        console.error("Failed to process check-in photo:", e);
+      }
+    }
+
+    let address = null;
+    if (record.lat != null && record.lng != null) {
+      try {
+        const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${record.lat}&lon=${record.lng}`);
+        const geo = await res.json();
+        address = geo?.display_name || null;
+      } catch (e) {
+        console.error("Reverse geocoding failed:", e);
+      }
+    }
+
+    const { data, error } = await supabaseClient
+      .from("check_ins")
+      .insert({
+        employee_id: record.empId, dept_id: record.deptId, type: record.type, timestamp: record.timestamp,
+        lat: record.lat, lng: record.lng, photo_url: photoPath, elapsed_sec: record.elapsedSec,
+        within_window: record.withinWindow, address,
+      })
+      .select()
+      .single();
+
+    if (error || !data) {
+      console.error("Failed to save check-in:", error);
+      notify("Couldn't save your check-in — please try again.");
+      return;
+    }
+
+    setCheckins((prev) => [{
+      id: data.id, empId: data.employee_id, deptId: data.dept_id, type: data.type, timestamp: data.timestamp,
+      lat: data.lat, lng: data.lng, photo: data.photo_url, elapsedSec: data.elapsed_sec,
+      withinWindow: data.within_window, address: data.address || null,
+    }, ...prev]);
+  };
   const addReview = (record) => setReviews((prev) => [record, ...prev]);
   const updateReview = (id, patch) => setReviews((prev) => prev.map((r) => r.id === id ? { ...r, ...patch } : r));
   const addReward = (record) => setRewards((prev) => [record, ...prev]);
@@ -1738,6 +1801,29 @@ function TaskRow({ task, goal, employee, colors, locked, rec, toggleTask, submit
   );
 }
 
+// Check-in photos live in the private "checkin-photos" bucket now (not inline data URLs), so rendering
+// one means resolving a short-lived signed URL first. `path` is what's stored on the check-in record;
+// `onReady` (optional) hands the resolved URL up to a parent that wants to open it in a Lightbox on click.
+function CheckinPhotoThumb({ path, className, onClick, onReady }) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    let active = true;
+    setUrl(null);
+    if (!path) return;
+    supabaseClient.storage.from("checkin-photos").createSignedUrl(path, 3600).then(({ data, error }) => {
+      if (!active) return;
+      if (error) { console.error("Failed to sign check-in photo URL:", error); return; }
+      setUrl(data?.signedUrl || null);
+      if (data?.signedUrl && onReady) onReady(data.signedUrl);
+    });
+    return () => { active = false; };
+  }, [path]);
+
+  if (!path) return null;
+  if (!url) return <div className={`${className} bg-slate-100 animate-pulse`} />;
+  return <img src={url} onClick={onClick} className={className} />;
+}
+
 function StaffCheckin({ employee, dept, colors, checkins, addCheckin }) {
   const [stage, setStage] = useState("idle"); // idle | locating | manualLoc | camera | done
   const [startedAt, setStartedAt] = useState(null);
@@ -1897,7 +1983,7 @@ function StaffCheckin({ employee, dept, colors, checkins, addCheckin }) {
         {myCheckins.length === 0 && <p className="text-sm text-slate-400 px-1">No check-ins yet.</p>}
         {myCheckins.map((c) => (
           <div key={c.id} className="bg-white rounded-lg border border-slate-200 p-3 flex items-center gap-3">
-            {c.photo ? <img src={c.photo} className="w-10 h-10 rounded-md object-cover" /> : <div className="w-10 h-10 rounded-md bg-slate-100 flex items-center justify-center text-slate-300"><MapPin size={16} /></div>}
+            {c.photo ? <CheckinPhotoThumb path={c.photo} className="w-10 h-10 rounded-md object-cover" /> : <div className="w-10 h-10 rounded-md bg-slate-100 flex items-center justify-center text-slate-300"><MapPin size={16} /></div>}
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-slate-700">{c.type === "in" ? "Checked in" : "Checked out"}</p>
               <p className="text-xs text-slate-400">{new Date(c.timestamp).toLocaleString()}</p>
@@ -3262,6 +3348,31 @@ function AdminApprovals({ departments, goals, activeCompanyId, switchCompany, co
   );
 }
 
+// Same idea as CheckinPhotoThumb, but resolves its own signed URL up front so a click can open it
+// straight into the Lightbox without a second round trip.
+function AdminCheckinPhotoCell({ path, title, onOpen }) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    let active = true;
+    setUrl(null);
+    if (!path) return;
+    supabaseClient.storage.from("checkin-photos").createSignedUrl(path, 3600).then(({ data, error }) => {
+      if (!active) return;
+      if (error) { console.error("Failed to sign check-in photo URL:", error); return; }
+      setUrl(data?.signedUrl || null);
+    });
+    return () => { active = false; };
+  }, [path]);
+
+  if (!path) return <span className="text-slate-300 text-xs">—</span>;
+  if (!url) return <div className="w-9 h-9 rounded-md bg-slate-100 animate-pulse" />;
+  return (
+    <button onClick={() => onOpen({ type: "image", title, src: url })}>
+      <img src={url} className="w-9 h-9 rounded-md object-cover hover:opacity-80 transition-opacity cursor-pointer" />
+    </button>
+  );
+}
+
 function AdminCheckins({ departments, employees, checkins, activeDeptId, setActiveDeptId }) {
   const list = checkins.filter((c) => c.deptId === activeDeptId);
   const empById = {};
@@ -3292,13 +3403,11 @@ function AdminCheckins({ departments, employees, checkins, activeDeptId, setActi
                 <td className="px-4 py-2.5 font-medium text-slate-700 whitespace-nowrap">{empById[c.empId]?.name}</td>
                 <td className="px-4 py-2.5"><span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${c.type === "in" ? "bg-teal-50 text-teal-700" : "bg-slate-100 text-slate-600"}`}>{c.type === "in" ? "Check-in" : "Check-out"}</span></td>
                 <td className="px-4 py-2.5 text-slate-500 whitespace-nowrap font-mono text-xs">{new Date(c.timestamp).toLocaleString()}</td>
-                <td className="px-4 py-2.5 text-slate-500 font-mono text-xs">{c.lat ? `${c.lat.toFixed(4)}, ${c.lng.toFixed(4)}` : "—"}</td>
+                <td className="px-4 py-2.5 text-slate-500 text-xs max-w-[220px]">
+                  {c.address ? <span title={c.address}>{c.address}</span> : c.lat != null ? <span className="font-mono">{`${c.lat.toFixed(4)}, ${c.lng.toFixed(4)}`}</span> : "—"}
+                </td>
                 <td className="px-4 py-2.5">
-                  {c.photo ? (
-                    <button onClick={() => setLightbox({ type: "image", title: `${empById[c.empId]?.name} — ${new Date(c.timestamp).toLocaleString()}`, src: c.photo })}>
-                      <img src={c.photo} className="w-9 h-9 rounded-md object-cover hover:opacity-80 transition-opacity cursor-pointer" />
-                    </button>
-                  ) : <span className="text-slate-300 text-xs">—</span>}
+                  <AdminCheckinPhotoCell path={c.photo} title={`${empById[c.empId]?.name} — ${new Date(c.timestamp).toLocaleString()}`} onOpen={setLightbox} />
                 </td>
                 <td className="px-4 py-2.5 text-center">{c.type === "in" ? <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${c.withinWindow ? "bg-emerald-50 text-emerald-600" : "bg-rose-50 text-rose-600"}`}>{c.withinWindow ? "on time" : "late"}</span> : <span className="text-slate-300 text-xs">—</span>}</td>
               </tr>
