@@ -38,7 +38,30 @@ const { useState, useMemo, useRef, useEffect } = React;
 const SUPABASE_URL = "https://sdxvgujpubsrwiwzcobz.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_wdWsWE97HtXCesDkRwA0Yg_Z-HnzvZU";
 const { createClient } = window.supabase;
-const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// "Remember me" support: Supabase's client needs one fixed storage object at creation time,
+// but we want login-time control over whether the session survives closing the browser
+// (localStorage) or not (sessionStorage, cleared when the tab/browser fully closes). This
+// adapter checks a flag written right before signInWithPassword and routes accordingly —
+// removeItem clears both so a logout/switch never leaves a stale copy behind in the other one.
+const REMEMBER_FLAG_KEY = "scorecard-remember";
+const rememberAwareStorage = {
+  getItem: (key) => {
+    const remember = localStorage.getItem(REMEMBER_FLAG_KEY) !== "0";
+    return (remember ? localStorage : sessionStorage).getItem(key);
+  },
+  setItem: (key, value) => {
+    const remember = localStorage.getItem(REMEMBER_FLAG_KEY) !== "0";
+    (remember ? localStorage : sessionStorage).setItem(key, value);
+  },
+  removeItem: (key) => {
+    localStorage.removeItem(key);
+    sessionStorage.removeItem(key);
+  },
+};
+const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { storage: rememberAwareStorage, persistSession: true, autoRefreshToken: true },
+});
 
 function IconBase({ size = 18, className = "", children, ...rest }) {
   return (
@@ -82,6 +105,7 @@ const Pencil = (p) => <IconBase {...p}><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20
 const Check = (p) => <IconBase {...p}><polyline points="20 6 9 17 4 12"/></IconBase>;
 const Eye = (p) => <IconBase {...p}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></IconBase>;
 const EyeOff = (p) => <IconBase {...p}><path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a18.4 18.4 0 0 1 5.06-5.94M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></IconBase>;
+const Key = (p) => <IconBase {...p}><circle cx="7.5" cy="15.5" r="5.5"/><path d="M11 11 21 1M21 1h-4M21 1v4M17.5 6.5 19 8"/></IconBase>;
 const Undo2 = (p) => <IconBase {...p}><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></IconBase>;
 const MessageCircle = (p) => <IconBase {...p}><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 8.5 8.5 0 0 1-4-1L3 21l1.5-5.5A8.38 8.38 0 0 1 3.5 11.5 8.5 8.5 0 1 1 21 11.5z"/></IconBase>;
 const Sliders = (p) => <IconBase {...p}><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></IconBase>;
@@ -1038,6 +1062,25 @@ function KPIApp() {
     setGoals((prev) => prev.map((g) => (g.autoAssignWholeDept && g.deptId === deptId) ? { ...g, assignedEmployeeIds: [...g.assignedEmployeeIds, emp.id] } : g));
     return emp;
   };
+
+  // Lets a CEO/admin set an employee's password directly, for staff (e.g. labourers) who don't
+  // have a real email and can't use the self-service "forgot password" flow. Same reason as
+  // create-employee: only the service_role key can force-set someone else's password, and that
+  // key must never reach the browser, so this goes through a server-side Edge Function too.
+  const resetEmployeePassword = async (employeeId, newPassword) => {
+    const { data, error } = await supabaseClient.functions.invoke("admin-reset-password", {
+      body: { employeeId, newPassword },
+    });
+    if (error || !data?.ok) {
+      let detail = data?.error || error?.message || "unknown error";
+      if (error?.context && typeof error.context.json === "function") {
+        try { const body = await error.context.clone().json(); if (body?.error) detail = body.error; } catch {}
+      }
+      console.error("Failed to reset password:", detail, error, data);
+      return { ok: false, error: detail };
+    }
+    return { ok: true };
+  };
   const updateEmployee = (empId, patch) => {
     setEmployees((prev) => prev.map((e) => e.id === empId ? { ...e, ...patch } : e));
     const dbPatch = {};
@@ -1323,7 +1366,7 @@ function KPIApp() {
     companies, addCompany, updateCompany, archiveCompany, restoreCompany,
     employees, departments, deptById, goals, getRecord, toggleTask, adminUntick, submitTaskWithDetails, setApproval, setRemark, setAdminRemark, setAttachment,
     isGoalLocked, isReviewLocked, employeeGoals, employeePoints, addGoal, updateGoal, archiveGoal, restoreGoal, addTaskToGoal, updateTaskRequiresAttachment, updateTaskRequiresRemark, updateTaskText,
-    removeTaskFromGoal, updateTaskWeight, toggleAssignment, addEmployee, updateEmployee, archiveEmployee, restoreEmployee, addDepartment, archiveDepartment, restoreDepartment, checkins, addCheckin,
+    removeTaskFromGoal, updateTaskWeight, toggleAssignment, addEmployee, updateEmployee, archiveEmployee, restoreEmployee, resetEmployeePassword, addDepartment, archiveDepartment, restoreDepartment, checkins, addCheckin,
     reviews, addReview, updateReview, rewards, addReward, notify,
     rewardSchemes, addRewardScheme, archiveRewardScheme, restoreRewardScheme, toggleRewardActive, toggleRewardEnrollment, updateRewardEmployeeOverride, commitRewardSchemeEdit, goalCompletionForEmployee,
     getMonthView, commitCurrentMonthEdit, scheduleFutureVersion, employeeAnnualPoints,
@@ -1353,66 +1396,140 @@ function KPIApp() {
 
 // ---------------- Login / Signup ----------------
 
+// 6 single-digit boxes for entering an emailed verification code. Auto-advances focus as you
+// type, steps back on backspace when a box is empty, and distributes a pasted code across boxes.
+function OtpBoxes({ length = 6, value, onChange, onComplete, disabled }) {
+  const refs = useRef([]);
+  const digits = Array.from({ length }, (_, i) => value[i] || "");
+
+  const applyValue = (joined) => {
+    onChange(joined);
+    if (joined.length === length) onComplete?.(joined);
+  };
+
+  const setDigit = (i, d) => {
+    const next = digits.slice();
+    next[i] = d;
+    applyValue(next.join(""));
+    if (d && i < length - 1) refs.current[i + 1]?.focus();
+  };
+
+  const handleKeyDown = (i, e) => {
+    if (e.key === "Backspace" && !digits[i] && i > 0) refs.current[i - 1]?.focus();
+  };
+
+  const handlePaste = (e) => {
+    const text = e.clipboardData.getData("text").replace(/\D/g, "").slice(0, length);
+    if (!text) return;
+    e.preventDefault();
+    applyValue(text);
+    refs.current[Math.min(text.length, length - 1)]?.focus();
+  };
+
+  return (
+    <div className="flex gap-2 justify-center" onPaste={handlePaste}>
+      {digits.map((d, i) => (
+        <input
+          key={i}
+          ref={(el) => (refs.current[i] = el)}
+          value={d}
+          disabled={disabled}
+          onChange={(e) => setDigit(i, e.target.value.replace(/\D/g, "").slice(-1))}
+          onKeyDown={(e) => handleKeyDown(i, e)}
+          inputMode="numeric"
+          maxLength={1}
+          className="w-11 h-12 text-center text-lg font-semibold rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-teal-600"
+        />
+      ))}
+    </div>
+  );
+}
+
 function LoginScreen({ onLogin }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [rememberMe, setRememberMe] = useState(true);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [mode, setMode] = useState("login"); // login | forgot
+
+  // mode machine for the whole screen: login | forgotEmail (ask for email) | forgotCode
+  // (enter the 6-digit code emailed by Supabase) | forgotNewPassword (set new password).
+  // This replaces the old "email a link, click it, hope the redirect + browser cache behave"
+  // flow — everything now happens in-app with a code, which sidesteps redirect/caching issues
+  // entirely.
+  const [mode, setMode] = useState("login");
   const [resetEmail, setResetEmail] = useState("");
   const [resetError, setResetError] = useState("");
-  const [resetSent, setResetSent] = useState(false);
   const [resetBusy, setResetBusy] = useState(false);
+  const [code, setCode] = useState("");
+  const [codeError, setCodeError] = useState("");
+  const [codeBusy, setCodeBusy] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
+  const [newPasswordError, setNewPasswordError] = useState("");
+  const [newPasswordBusy, setNewPasswordBusy] = useState(false);
 
-  const sendResetLink = async () => {
-    setResetError("");
-    if (!resetEmail.trim()) { setResetError("Enter your email."); return; }
-    setResetBusy(true);
-    const { error: resetErr } = await supabaseClient.auth.resetPasswordForEmail(resetEmail.trim(), {
-      redirectTo: window.location.href.split("#")[0].split("?")[0],
-    });
-    setResetBusy(false);
-    if (resetErr) { setResetError(resetErr.message); return; }
-    setResetSent(true);
+  const signInAndEnter = async (emailValue, passwordValue) => {
+    const { data, error: authError } = await supabaseClient.auth.signInWithPassword({ email: emailValue, password: passwordValue });
+    if (authError) throw authError;
+    const { data: emp, error: empError } = await supabaseClient.from("employees").select("*").eq("id", data.user.id).single();
+    if (empError || !emp) throw new Error("Signed in, but no employee record was found for this account. Ask your admin to link it.");
+    onLogin({ role: emp.role, employeeId: emp.id, name: emp.name, email: emp.email, deptId: emp.dept_id ?? emp.department_id ?? null, companyId: emp.company_id ?? null });
   };
 
   const submit = async () => {
     setError("");
     if (!email.trim() || !password) { setError("Enter your email and password."); return; }
     setBusy(true);
+    localStorage.setItem(REMEMBER_FLAG_KEY, rememberMe ? "1" : "0");
     try {
-      const { data, error: authError } = await supabaseClient.auth.signInWithPassword({
-        email: email.trim(),
-        password,
-      });
-      if (authError) {
-        setError(authError.message === "Invalid login credentials" ? "Incorrect email or password." : authError.message);
-        setBusy(false);
-        return;
-      }
-      const { data: emp, error: empError } = await supabaseClient
-        .from("employees")
-        .select("*")
-        .eq("id", data.user.id)
-        .single();
-      if (empError || !emp) {
-        setError("Signed in, but no employee record was found for this account. Ask your admin to link it.");
-        await supabaseClient.auth.signOut();
-        setBusy(false);
-        return;
-      }
-      onLogin({
-        role: emp.role,
-        employeeId: emp.id,
-        name: emp.name,
-        email: emp.email,
-        deptId: emp.dept_id ?? emp.department_id ?? null,
-        companyId: emp.company_id ?? null,
-      });
+      await signInAndEnter(email.trim(), password);
     } catch (e) {
-      setError("Something went wrong signing you in. Please try again.");
+      setError(e.message === "Invalid login credentials" ? "Incorrect email or password." : e.message || "Something went wrong signing you in.");
       setBusy(false);
+    }
+  };
+
+  const sendResetCode = async () => {
+    setResetError("");
+    if (!resetEmail.trim()) { setResetError("Enter your email."); return; }
+    setResetBusy(true);
+    const { error: resetErr } = await supabaseClient.auth.resetPasswordForEmail(resetEmail.trim());
+    setResetBusy(false);
+    if (resetErr) { setResetError(resetErr.message); return; }
+    setCode("");
+    setCodeError("");
+    setMode("forgotCode");
+  };
+
+  const verifyCode = async (fullCode) => {
+    const codeToCheck = fullCode ?? code;
+    if (codeToCheck.length !== 6) { setCodeError("Enter all 6 digits."); return; }
+    setCodeError("");
+    setCodeBusy(true);
+    const { error: verifyError } = await supabaseClient.auth.verifyOtp({ email: resetEmail.trim(), token: codeToCheck, type: "recovery" });
+    setCodeBusy(false);
+    if (verifyError) { setCodeError(verifyError.message === "Token has expired or is invalid" ? "That code is wrong or expired — request a new one." : verifyError.message); return; }
+    setNewPassword("");
+    setConfirmNewPassword("");
+    setNewPasswordError("");
+    setMode("forgotNewPassword");
+  };
+
+  const submitNewPassword = async () => {
+    setNewPasswordError("");
+    if (newPassword.length < 6) { setNewPasswordError("Password must be at least 6 characters."); return; }
+    if (newPassword !== confirmNewPassword) { setNewPasswordError("Passwords don't match."); return; }
+    setNewPasswordBusy(true);
+    const { error: updateError } = await supabaseClient.auth.updateUser({ password: newPassword });
+    if (updateError) { setNewPasswordBusy(false); setNewPasswordError(updateError.message); return; }
+    localStorage.setItem(REMEMBER_FLAG_KEY, rememberMe ? "1" : "0");
+    try {
+      await signInAndEnter(resetEmail.trim(), newPassword);
+    } catch (e) {
+      setNewPasswordBusy(false);
+      setNewPasswordError("Password was set, but signing you in failed — go back and log in with your new password.");
     }
   };
 
@@ -1424,7 +1541,7 @@ function LoginScreen({ onLogin }) {
           <span className="font-display font-semibold text-xl tracking-tight">Scorecard</span>
         </div>
 
-        {mode === "login" ? (
+        {mode === "login" && (
           <div className="bg-white rounded-xl border border-slate-200 p-6">
             <label className="block text-xs font-medium text-slate-500 mb-1.5">Email</label>
             <input
@@ -1435,7 +1552,7 @@ function LoginScreen({ onLogin }) {
               className="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-teal-600"
             />
             <label className="block text-xs font-medium text-slate-500 mb-1.5">Password</label>
-            <div className="relative mb-1.5">
+            <div className="relative mb-3">
               <input
                 type={showPassword ? "text" : "password"}
                 value={password}
@@ -1448,7 +1565,11 @@ function LoginScreen({ onLogin }) {
                 {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
               </button>
             </div>
-            <button type="button" onClick={() => { setMode("forgot"); setResetEmail(email); setResetSent(false); setResetError(""); }} className="text-[11px] text-teal-700 hover:underline mb-4 block">
+            <label className="flex items-center gap-2 mb-1.5 cursor-pointer select-none">
+              <input type="checkbox" checked={rememberMe} onChange={(e) => setRememberMe(e.target.checked)} className="w-4 h-4 rounded accent-teal-600" />
+              <span className="text-xs text-slate-600">Remember me on this device</span>
+            </label>
+            <button type="button" onClick={() => { setMode("forgotEmail"); setResetEmail(email); setResetError(""); }} className="text-[11px] text-teal-700 hover:underline mb-4 block">
               Forgot password?
             </button>
 
@@ -1462,32 +1583,71 @@ function LoginScreen({ onLogin }) {
               Accounts are created by your admin in People management — you can't self-register.
             </p>
           </div>
-        ) : (
+        )}
+
+        {mode === "forgotEmail" && (
           <div className="bg-white rounded-xl border border-slate-200 p-6">
-            {resetSent ? (
-              <>
-                <p className="text-sm font-semibold text-slate-800 mb-2">Check your email</p>
-                <p className="text-xs text-slate-500 mb-4">If an account exists for {resetEmail.trim()}, a reset link was just sent. Open it on this device to set a new password.</p>
-                <button onClick={() => setMode("login")} className="w-full py-2.5 rounded-lg border border-slate-200 text-slate-600 text-sm font-medium">Back to log in</button>
-              </>
-            ) : (
-              <>
-                <p className="text-sm font-semibold text-slate-800 mb-3">Reset your password</p>
-                <label className="block text-xs font-medium text-slate-500 mb-1.5">Email</label>
-                <input
-                  value={resetEmail}
-                  onChange={(e) => setResetEmail(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && sendResetLink()}
-                  placeholder="you@company.com"
-                  className="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-teal-600"
-                />
-                {resetError && <p className="text-xs text-rose-500 mb-3">{resetError}</p>}
-                <button onClick={sendResetLink} disabled={resetBusy} className="w-full py-2.5 rounded-lg bg-slate-900 text-white text-sm font-medium disabled:opacity-60 mb-2">
-                  {resetBusy ? "Sending…" : "Send reset link"}
-                </button>
-                <button onClick={() => setMode("login")} className="w-full py-2 text-xs text-slate-500">Back to log in</button>
-              </>
-            )}
+            <p className="text-sm font-semibold text-slate-800 mb-1">Reset your password</p>
+            <p className="text-xs text-slate-500 mb-3">We'll email you a 6-digit code to verify it's you.</p>
+            <label className="block text-xs font-medium text-slate-500 mb-1.5">Email</label>
+            <input
+              value={resetEmail}
+              onChange={(e) => setResetEmail(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && sendResetCode()}
+              placeholder="you@company.com"
+              className="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-teal-600"
+            />
+            {resetError && <p className="text-xs text-rose-500 mb-3">{resetError}</p>}
+            <button onClick={sendResetCode} disabled={resetBusy} className="w-full py-2.5 rounded-lg bg-slate-900 text-white text-sm font-medium disabled:opacity-60 mb-2">
+              {resetBusy ? "Sending…" : "Send code"}
+            </button>
+            <button onClick={() => setMode("login")} className="w-full py-2 text-xs text-slate-500">Back to log in</button>
+          </div>
+        )}
+
+        {mode === "forgotCode" && (
+          <div className="bg-white rounded-xl border border-slate-200 p-6">
+            <p className="text-sm font-semibold text-slate-800 mb-1">Enter the code</p>
+            <p className="text-xs text-slate-500 mb-4">Sent to {resetEmail.trim()} — expires shortly, so enter it soon.</p>
+            <div className="mb-4">
+              <OtpBoxes value={code} onChange={setCode} onComplete={verifyCode} disabled={codeBusy} />
+            </div>
+            {codeError && <p className="text-xs text-rose-500 mb-3 text-center">{codeError}</p>}
+            <button onClick={() => verifyCode()} disabled={codeBusy} className="w-full py-2.5 rounded-lg bg-slate-900 text-white text-sm font-medium disabled:opacity-60 mb-2">
+              {codeBusy ? "Verifying…" : "Verify code"}
+            </button>
+            <button onClick={sendResetCode} disabled={resetBusy} className="w-full py-2 text-xs text-teal-700">{resetBusy ? "Resending…" : "Resend code"}</button>
+            <button onClick={() => setMode("forgotEmail")} className="w-full py-1 text-xs text-slate-500">Back</button>
+          </div>
+        )}
+
+        {mode === "forgotNewPassword" && (
+          <div className="bg-white rounded-xl border border-slate-200 p-6">
+            <p className="text-sm font-semibold text-slate-800 mb-3">Set a new password</p>
+            <label className="block text-xs font-medium text-slate-500 mb-1.5">New password</label>
+            <div className="relative mb-3">
+              <input
+                type={showPassword ? "text" : "password"}
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                className="w-full px-3 py-2.5 pr-10 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-600"
+              />
+              <button type="button" onClick={() => setShowPassword((s) => !s)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
+            </div>
+            <label className="block text-xs font-medium text-slate-500 mb-1.5">Confirm new password</label>
+            <input
+              type={showPassword ? "text" : "password"}
+              value={confirmNewPassword}
+              onChange={(e) => setConfirmNewPassword(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && submitNewPassword()}
+              className="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-teal-600"
+            />
+            {newPasswordError && <p className="text-xs text-rose-500 mb-3">{newPasswordError}</p>}
+            <button onClick={submitNewPassword} disabled={newPasswordBusy} className="w-full py-2.5 rounded-lg bg-slate-900 text-white text-sm font-medium disabled:opacity-60">
+              {newPasswordBusy ? "Saving…" : "Set password & continue"}
+            </button>
           </div>
         )}
       </div>
@@ -2615,8 +2775,9 @@ function AdminOverview({ companies, departments, employees, employeePoints }) {
   );
 }
 
-function AdminPeople({ departments, employees, addEmployee, archiveEmployee, restoreEmployee, addDepartment, archiveDepartment, restoreDepartment, activeCompanyId, switchCompany, companies, activeDeptId, setActiveDeptId, goals, getRecord, employeePoints, notify }) {
+function AdminPeople({ departments, employees, addEmployee, archiveEmployee, restoreEmployee, resetEmployeePassword, addDepartment, archiveDepartment, restoreDepartment, activeCompanyId, switchCompany, companies, activeDeptId, setActiveDeptId, goals, getRecord, employeePoints, notify }) {
   const [selectedEmpId, setSelectedEmpId] = useState(null);
+  const [resetPwEmp, setResetPwEmp] = useState(null);
   const [showAddEmployee, setShowAddEmployee] = useState(false);
   const [showAddDept, setShowAddDept] = useState(false);
   const [showManageDept, setShowManageDept] = useState(false);
@@ -2682,6 +2843,9 @@ function AdminPeople({ departments, employees, addEmployee, archiveEmployee, res
               </button>
               <div className="flex items-center gap-3 shrink-0 ml-3">
                 <PercentBar value={pct} width={80} />
+                {e.active !== false && (
+                  <button onClick={() => setResetPwEmp(e)} title="Reset password" className="p-1.5 rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-600"><Key size={14} /></button>
+                )}
                 {e.active === false ? (
                   <button onClick={() => { restoreEmployee(e.id); notify(`Restored ${e.name}`); }} title="Restore" className="p-1.5 rounded-md text-emerald-600 hover:bg-emerald-50"><Undo2 size={14} /></button>
                 ) : (
@@ -2732,6 +2896,88 @@ function AdminPeople({ departments, employees, addEmployee, archiveEmployee, res
           </div>
         </div>
       )}
+
+      {resetPwEmp && (
+        <AdminResetPasswordModal
+          employee={resetPwEmp}
+          resetEmployeePassword={resetEmployeePassword}
+          notify={notify}
+          onClose={() => setResetPwEmp(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Lets a CEO/admin set an employee's password directly — for staff (e.g. labourers) with no real
+// email who can't use the self-service "forgot password" flow. Shows the new password once it's
+// set so the admin can hand it to that worker.
+function AdminResetPasswordModal({ employee, resetEmployeePassword, notify, onClose }) {
+  const [newPassword, setNewPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(true);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const randomPassword = () => {
+    // Easy to read aloud/type on a shared device — no ambiguous look-alike characters (0/O, 1/l/I).
+    const chars = "23456789ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz";
+    let out = "";
+    for (let i = 0; i < 8; i++) out += chars[Math.floor(Math.random() * chars.length)];
+    setNewPassword(out);
+  };
+
+  const submit = async () => {
+    setError("");
+    if (newPassword.length < 6) { setError("Password must be at least 6 characters."); return; }
+    setBusy(true);
+    const result = await resetEmployeePassword(employee.id, newPassword);
+    setBusy(false);
+    if (!result.ok) { setError(result.error || "Something went wrong."); return; }
+    setDone(true);
+    notify(`Password reset for ${employee.name}`);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-30 p-6" onClick={onClose}>
+      <div className="bg-white rounded-xl max-w-sm w-full p-6" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-1">
+          <p className="font-display text-lg font-semibold tracking-tight">Reset password</p>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><XCircle size={18} /></button>
+        </div>
+        <p className="text-xs text-slate-400 mb-4">For {employee.name}{employee.email ? ` (${employee.email})` : ""}. They can log in with this immediately.</p>
+
+        {done ? (
+          <>
+            <p className="text-xs text-slate-500 mb-1.5">New password — share this with {employee.name}:</p>
+            <p className="font-mono text-lg font-semibold bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 mb-4 tracking-wide">{newPassword}</p>
+            <button onClick={onClose} className="w-full py-2.5 rounded-lg bg-slate-900 text-white text-sm font-medium">Done</button>
+          </>
+        ) : (
+          <>
+            <label className="block text-xs font-medium text-slate-500 mb-1.5">New password</label>
+            <div className="relative mb-2">
+              <input
+                type={showPassword ? "text" : "password"}
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && submit()}
+                placeholder="At least 6 characters"
+                className="w-full px-3 py-2.5 pr-10 rounded-lg border border-slate-200 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-teal-600"
+              />
+              <button type="button" onClick={() => setShowPassword((s) => !s)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
+            </div>
+            <button type="button" onClick={randomPassword} className="text-[11px] text-teal-700 hover:underline mb-4 block">Generate a random password</button>
+            {error && <p className="text-xs text-rose-500 mb-3">{error}</p>}
+            <div className="flex gap-2">
+              <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-slate-600 text-sm font-medium">Cancel</button>
+              <button onClick={submit} disabled={busy} className="flex-1 py-2.5 rounded-lg bg-slate-900 text-white text-sm font-medium disabled:opacity-60">{busy ? "Saving…" : "Set password"}</button>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
