@@ -3497,7 +3497,8 @@ function AdminApprovals({ departments, goals, activeCompanyId, switchCompany, co
             {rows.length === 0 ? (
               <p className="text-xs text-slate-400 p-4">No one ticked a task on this goal in {monthLabel(isoMonth)}.</p>
             ) : (
-              <table className="w-full text-sm">
+              <div className="overflow-x-auto">
+              <table className="w-full text-sm" style={{ minWidth: 900 }}>
                 <thead>
                   <tr className="border-b border-slate-100 bg-slate-50/60 text-left text-slate-500">
                     <th className="px-3 py-2 font-medium">Employee</th>
@@ -3578,6 +3579,7 @@ function AdminApprovals({ departments, goals, activeCompanyId, switchCompany, co
                   })}
                 </tbody>
               </table>
+              </div>
             )}
           </div>
         );
@@ -3624,16 +3626,16 @@ function AdminCheckins({ departments, employees, checkins, activeDeptId, setActi
       <SectionTitle sub="Live view of staff check-in / check-out records — location, photo, and timing window.">Check-ins</SectionTitle>
       <DeptTabs departments={departments} activeDeptId={activeDeptId} setActiveDeptId={setActiveDeptId} />
 
-      <div className="bg-white rounded-xl border border-slate-200 mt-4 overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="bg-white rounded-xl border border-slate-200 mt-4 overflow-x-auto">
+        <table className="w-full text-sm" style={{ minWidth: 760 }}>
           <thead>
             <tr className="border-b border-slate-100 bg-slate-50/60 text-left text-slate-500">
-              <th className="px-4 py-2.5 font-medium">Person</th>
-              <th className="px-4 py-2.5 font-medium">Type</th>
-              <th className="px-4 py-2.5 font-medium">Time</th>
+              <th className="px-4 py-2.5 font-medium whitespace-nowrap">Person</th>
+              <th className="px-4 py-2.5 font-medium whitespace-nowrap">Type</th>
+              <th className="px-4 py-2.5 font-medium whitespace-nowrap">Time</th>
               <th className="px-4 py-2.5 font-medium">Location</th>
-              <th className="px-4 py-2.5 font-medium">Photo</th>
-              <th className="px-4 py-2.5 font-medium text-center">Window</th>
+              <th className="px-4 py-2.5 font-medium whitespace-nowrap">Photo</th>
+              <th className="px-4 py-2.5 font-medium text-center whitespace-nowrap">Window</th>
             </tr>
           </thead>
           <tbody>
@@ -3641,15 +3643,15 @@ function AdminCheckins({ departments, employees, checkins, activeDeptId, setActi
             {list.map((c) => (
               <tr key={c.id} className="border-b border-slate-50 last:border-0">
                 <td className="px-4 py-2.5 font-medium text-slate-700 whitespace-nowrap">{empById[c.empId]?.name}</td>
-                <td className="px-4 py-2.5"><span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${c.type === "in" ? "bg-teal-50 text-teal-700" : "bg-slate-100 text-slate-600"}`}>{c.type === "in" ? "Check-in" : "Check-out"}</span></td>
+                <td className="px-4 py-2.5 whitespace-nowrap"><span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${c.type === "in" ? "bg-teal-50 text-teal-700" : "bg-slate-100 text-slate-600"}`}>{c.type === "in" ? "Check-in" : "Check-out"}</span></td>
                 <td className="px-4 py-2.5 text-slate-500 whitespace-nowrap font-mono text-xs">{new Date(c.timestamp).toLocaleString()}</td>
-                <td className="px-4 py-2.5 text-slate-500 text-xs max-w-[220px]">
+                <td className="px-4 py-2.5 text-slate-500 text-xs min-w-[220px] max-w-[280px]">
                   {c.address ? <span title={c.address}>{c.address}</span> : c.lat != null ? <span className="font-mono">{`${c.lat.toFixed(4)}, ${c.lng.toFixed(4)}`}</span> : "—"}
                 </td>
-                <td className="px-4 py-2.5">
+                <td className="px-4 py-2.5 whitespace-nowrap">
                   <AdminCheckinPhotoCell path={c.photo} title={`${empById[c.empId]?.name} — ${new Date(c.timestamp).toLocaleString()}`} onOpen={setLightbox} />
                 </td>
-                <td className="px-4 py-2.5 text-center">{c.type === "in" ? <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${c.withinWindow ? "bg-emerald-50 text-emerald-600" : "bg-rose-50 text-rose-600"}`}>{c.withinWindow ? "on time" : "late"}</span> : <span className="text-slate-300 text-xs">—</span>}</td>
+                <td className="px-4 py-2.5 text-center whitespace-nowrap">{c.type === "in" ? <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${c.withinWindow ? "bg-emerald-50 text-emerald-600" : "bg-rose-50 text-rose-600"}`}>{c.withinWindow ? "on time" : "late"}</span> : <span className="text-slate-300 text-xs">—</span>}</td>
               </tr>
             ))}
           </tbody>
