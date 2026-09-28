@@ -657,15 +657,20 @@ function KPIApp() {
     persistRecord(empId, goal.id, taskId, merged);
   };
 
-  // Admin un-ticking a submission — distinct from staff's own toggleTask because this notifies the employee.
+  // Admin un-ticking a submission is how rejection actually works in this app — distinct from staff's
+  // own toggleTask because this notifies the employee. Used to reset all the way back to "none", which
+  // made a rejected submission indistinguishable from a task nobody ever touched (staff got no feedback
+  // that anything happened, and reports/exports showed "not started" for what was actually rejected
+  // work). Now records "rejected" instead — staff still sees it as re-editable (same as "none") and can
+  // resubmit, which flips it back to "pending" via submitTaskWithDetails, same as before.
   const adminUntick = (empId, goal, taskId) => {
     const task = goal.tasks.find((t) => t.id === taskId);
     const rec = getRecord(empId, goal.id, taskId);
     const k = key(empId, goal.id, taskId);
-    const merged = { ...rec, done: false, approval: "none", awardedPoints: null };
+    const merged = { ...rec, done: false, approval: "rejected", awardedPoints: null };
     setGoalRecords((prev) => ({ ...prev, [k]: merged }));
     persistRecord(empId, goal.id, taskId, merged);
-    if (task) addNotification(empId, `"${task.text}" was un-ticked by management${rec.adminRemark ? ` — ${rec.adminRemark}` : ""}`, true);
+    if (task) addNotification(empId, `"${task.text}" was rejected by management${rec.adminRemark ? ` — ${rec.adminRemark}` : ""}`, true);
   };
 
   // Used for tasks that require an attachment and/or remark: staff supplies these at the same time as ticking.
@@ -759,7 +764,7 @@ function KPIApp() {
           awardedSum += (r.awardedPoints ?? frozenWeight);
         } else {
           capacity += t.weight;
-          if (r.approval === "pending") pending += t.weight;
+          if (r.approval === "pending" || r.approval === "rejected") pending += t.weight;
         }
         if (r.done) doneCount += 1;
       });
@@ -2247,6 +2252,12 @@ function TaskRow({ task, goal, employee, colors, locked, rec, toggleTask, submit
       ) : (
         !locked && (
           <div className="mt-2 ml-8">
+            {rec.approval === "rejected" && (
+              <div className="mb-2 px-2.5 py-1.5 rounded-lg bg-rose-50 text-rose-600">
+                <p className="text-[11px] font-medium flex items-center gap-1"><XCircle size={12} />Rejected — please redo and resubmit</p>
+                {rec.adminRemark && <p className="text-[11px] text-rose-500 mt-0.5">{rec.adminRemark}</p>}
+              </div>
+            )}
             <button onClick={() => setExpanded((s) => !s)} className="text-[11px] text-teal-700 hover:underline">
               {expanded ? "Hide remark & attachment" : "Add remark or attachment"}
             </button>
@@ -2985,7 +2996,8 @@ function AdminPeople({ departments, employees, addEmployee, archiveEmployee, res
                           <span className="text-slate-600">{t.text}</span>
                           <span className={
                             r.approval === "approved" ? "text-emerald-600 font-medium" :
-                            r.approval === "pending" ? "text-amber-600 font-medium" : "text-slate-300"
+                            r.approval === "pending" ? "text-amber-600 font-medium" :
+                            r.approval === "rejected" ? "text-rose-500 font-medium" : "text-slate-300"
                           }>
                             {r.approval === "approved" ? `${r.awardedPoints ?? (r.awardedWeight ?? t.weight)}/${r.awardedWeight ?? t.weight} pts` : r.approval === "none" ? "not started" : r.approval}
                           </span>
@@ -3911,6 +3923,7 @@ function AdminApprovals({ departments, goals, activeCompanyId, switchCompany, co
                         <td className="px-3 py-2.5 text-center whitespace-nowrap">
                           {rec.approval === "approved" && <span className="text-[11px] font-semibold text-emerald-600">Approved</span>}
                           {rec.approval === "pending" && <span className="text-[11px] font-semibold text-amber-600">Pending</span>}
+                          {rec.approval === "rejected" && <span className="text-[11px] font-semibold text-rose-500">Rejected</span>}
                         </td>
                         {isActionable && (
                           <td className="px-3 py-2.5 text-right whitespace-nowrap">
@@ -4364,12 +4377,16 @@ function monthRowsForGoal(goal, isoMonth, getRecord, getMonthView) {
 
 // Approved tasks score using their FROZEN weight/points (as approved) — same rule employeePoints
 // uses, so a later change to a task's live weight never retroactively rewrites a closed month's
-// report. Everything not approved (submitted-and-pending, or never touched) scores against the live
-// task weight; Scorecard has no "rejected" state so both bucket as "open" here.
+// report. Everything else scores against the live task weight; "rejected" (admin un-ticked it — see
+// adminUntick) is its own bucket, distinct from "open" (pending, or never touched at all), so a
+// report can actually tell "staff never did this" apart from "staff did this and admin turned it down."
 function scoreTask(task, rec) {
   if (rec.approval === "approved") {
     const achievable = rec.awardedWeight ?? task.weight;
     return { achievable, awarded: rec.awardedPoints ?? achievable, bucket: "approved" };
+  }
+  if (rec.approval === "rejected") {
+    return { achievable: task.weight, awarded: null, bucket: "rejected" };
   }
   return { achievable: task.weight, awarded: null, bucket: "open" };
 }
@@ -4384,11 +4401,12 @@ function buildGroupedRows(deptsInCompany, goals, empById, isoMonth, getRecord, g
       perEmp.forEach(({ empId, taskRows }) => {
         const emp = empById[empId];
         if (!emp || taskRows.length === 0) return;
-        let completedScore = 0, totalScore = 0, completedGoals = 0, approved = 0;
+        let completedScore = 0, totalScore = 0, completedGoals = 0, approved = 0, rejected = 0;
         taskRows.forEach(({ task, rec }) => {
           const { achievable, awarded, bucket } = scoreTask(task, rec);
           totalScore += achievable;
           if (bucket === "approved") { completedScore += awarded; approved += 1; }
+          if (bucket === "rejected") rejected += 1;
           if (rec.done) completedGoals += 1;
         });
         const totalGoals = taskRows.length;
@@ -4399,7 +4417,7 @@ function buildGroupedRows(deptsInCompany, goals, empById, isoMonth, getRecord, g
         rows.push({
           Month: monthLabel(isoMonth), "Full Name": emp.name, Department: dept.name, "vimiGoal Name": goal.name,
           Period: "Monthly", "Completion (%)": completion, "Completed Score": completedScore, "Total Score": totalScore,
-          "Completed Goals": completedGoals, "Total Goals": totalGoals, Approved: approved, Pending: totalGoals - approved, Rejected: 0,
+          "Completed Goals": completedGoals, "Total Goals": totalGoals, Approved: approved, Pending: totalGoals - approved - rejected, Rejected: rejected,
         });
       });
     });
@@ -4407,13 +4425,12 @@ function buildGroupedRows(deptsInCompany, goals, empById, isoMonth, getRecord, g
   return rows;
 }
 
-// Scorecard's approval states are approved/pending/none — Vimigo's sample only shows
-// Approved/In-Progress/Rejected. "pending" (submitted, awaiting approval) maps to "In-Progress";
-// Scorecard has no reject concept, so "none" (never submitted) gets its own "Not Started" label
-// rather than being force-fit into "Rejected", which would misleadingly read as staff work having
-// been turned down rather than simply not attempted yet. Flagged for Belle to correct if she'd
-// rather these rows were left out of the Details Report entirely.
-const APPROVAL_LABEL = { approved: "Approved", pending: "In-Progress", none: "Not Started" };
+// Scorecard's approval states are approved/pending/rejected/none. "pending" (submitted, awaiting
+// approval) maps to Vimigo's "In-Progress"; "rejected" (admin un-ticked a submission) maps straight
+// to "Rejected"; "none" (never submitted at all) gets its own "Not Started" label rather than being
+// folded into "Rejected" — those are different things and conflating them would misreport staff who
+// simply haven't gotten to a task yet as having had work turned down.
+const APPROVAL_LABEL = { approved: "Approved", pending: "In-Progress", rejected: "Rejected", none: "Not Started" };
 
 // Report 2 — "Details Report": one row per task, per employee, per month.
 function buildDetailRows(deptsInCompany, goals, empById, isoMonth, getRecord, getMonthView, deptFilter) {
@@ -4462,10 +4479,11 @@ function buildDetailRows(deptsInCompany, goals, empById, isoMonth, getRecord, ge
             // rather than duplicating "Goal" into it.
             Description: "",
             "Achievable Points": achievable,
-            // Vimigo lets staff self-report a points value on submission; Scorecard is binary
-            // done/not-done, so per the 2026-09-21 decision this is backfilled as the full achievable
-            // amount once the task is actually done, blank otherwise (not a real self-report feature).
-            "User Submitted Points": rec.done ? achievable : "",
+            // Vimigo's "User Submitted Points" (staff self-reporting a points value) doesn't apply here
+            // — Scorecard is binary done/not-done, and per Belle (2026-09-28) admin's own review note is
+            // more useful in this slot than a synthetic self-report number, since un-tick/reject is a real
+            // decision admin makes and records a remark for, not just a staff-side submission.
+            "Admin Review": rec.adminRemark || "",
             Remarks: rec.remark || "",
             "Admin Approved Points": rec.approval === "approved" ? awarded : "",
             "Approval Status": APPROVAL_LABEL[rec.approval] || rec.approval,
@@ -4509,7 +4527,7 @@ function AdminReports({ companies, activeCompanyId, switchCompany, departments, 
   // Preview tables show a trimmed column set for on-screen width — the actual download always has
   // every column (Description/Rewards/vimiGoal Settings Status included) regardless of this preview.
   const summaryCols = ["Month", "Full Name", "Department", "vimiGoal Name", "Period", "Completion (%)", "Completed Score", "Total Score", "Completed Goals", "Total Goals", "Approved", "Pending", "Rejected"];
-  const detailCols = ["Period Start Date", "Period End Date", "Full Name", "Department", "vimiGoal Set", "Goal", "Achievable Points", "User Submitted Points", "Remarks", "Admin Approved Points", "Approval Status", "Completed Date", "Completion (%)"];
+  const detailCols = ["Period Start Date", "Period End Date", "Full Name", "Department", "vimiGoal Set", "Goal", "Achievable Points", "Admin Review", "Remarks", "Admin Approved Points", "Approval Status", "Completed Date", "Completion (%)"];
   const cols = view === "summary" ? summaryCols : detailCols;
 
   return (
