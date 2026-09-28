@@ -468,7 +468,7 @@ function KPIApp() {
     if (!session) { setDataLoading(true); return; }
     let active = true;
     (async () => {
-      const [companiesRes, departmentsRes, employeesRes, goalsRes, tasksRes, assignmentsRes, recordsRes, historyRes, futureRes, checkinsRes] = await Promise.all([
+      const [companiesRes, departmentsRes, employeesRes, goalsRes, tasksRes, assignmentsRes, recordsRes, historyRes, futureRes, checkinsRes, rewardSchemesRes, rewardEnrollmentsRes] = await Promise.all([
         supabaseClient.from("companies").select("*"),
         supabaseClient.from("departments").select("*"),
         supabaseClient.from("employees").select("*"),
@@ -479,6 +479,8 @@ function KPIApp() {
         supabaseClient.from("goal_month_history").select("*"),
         supabaseClient.from("goal_future_versions").select("*"),
         supabaseClient.from("check_ins").select("*").order("timestamp", { ascending: false }),
+        supabaseClient.from("reward_schemes").select("*"),
+        supabaseClient.from("reward_enrollments").select("*"),
       ]);
       if (!active) return;
       if (companiesRes.error) console.error("Failed to load companies:", companiesRes.error);
@@ -491,6 +493,8 @@ function KPIApp() {
       if (historyRes.error) console.error("Failed to load goal month history:", historyRes.error);
       if (futureRes.error) console.error("Failed to load goal future versions:", futureRes.error);
       if (checkinsRes.error) console.error("Failed to load check-ins:", checkinsRes.error);
+      if (rewardSchemesRes.error) console.error("Failed to load reward schemes:", rewardSchemesRes.error);
+      if (rewardEnrollmentsRes.error) console.error("Failed to load reward enrollments:", rewardEnrollmentsRes.error);
 
       setCompanies((companiesRes.data || []).map((c) => ({
         id: c.id, name: c.name, active: c.active !== false,
@@ -568,6 +572,25 @@ function KPIApp() {
         id: c.id, empId: c.employee_id, deptId: c.dept_id, type: c.type, timestamp: c.timestamp,
         lat: c.lat, lng: c.lng, photo: c.photo_url, elapsedSec: c.elapsed_sec,
         withinWindow: c.within_window, address: c.address || null,
+      })));
+
+      // reward_enrollments has no "enrolled" boolean of its own — a row's mere presence for
+      // (scheme_id, employee_id) IS the enrollment, and that same row carries the per-employee
+      // override amount/remark. So both enrolledEmployeeIds and employeeOverrides for a scheme
+      // are just two views of the same set of rows, grouped here by scheme_id.
+      const enrollByScheme = {};
+      (rewardEnrollmentsRes.data || []).forEach((r) => {
+        const bucket = enrollByScheme[r.scheme_id] || (enrollByScheme[r.scheme_id] = { ids: [], overrides: {} });
+        bucket.ids.push(r.employee_id);
+        bucket.overrides[r.employee_id] = { updateAmount: Number(r.update_amount), remark: r.remark || "" };
+      });
+      setRewardSchemes((rewardSchemesRes.data || []).map((s) => ({
+        id: s.id, deptId: s.dept_id, companyId: s.company_id, goalId: s.goal_id,
+        startDate: s.start_date, endDate: s.end_date, baseAmount: Number(s.base_amount), active: s.active,
+        enrolledEmployeeIds: enrollByScheme[s.id]?.ids || [],
+        employeeOverrides: enrollByScheme[s.id]?.overrides || {},
+        futureBaseAmount: s.future_base_amount != null ? Number(s.future_base_amount) : null,
+        futureEffectiveMonth: s.future_effective_month || null,
       })));
 
       setDataLoading(false);
@@ -1221,9 +1244,16 @@ function KPIApp() {
   const addReward = (record) => setRewards((prev) => [record, ...prev]);
 
   // ---- Reward schemes (preset, recurring — like a goal, but pays out based on goal performance) ----
-  const addRewardScheme = (deptId, companyId, goalId, startDate, endDate, baseAmount) => {
+  // Creates the scheme row in Supabase first (mirrors addGoal) so local state holds the real DB id from
+  // the start — every later action here (enroll, override, edit) looks the scheme up by that id.
+  const addRewardScheme = async (deptId, companyId, goalId, startDate, endDate, baseAmount) => {
+    const { data: schemeRow, error } = await supabaseClient.from("reward_schemes").insert({
+      dept_id: deptId, company_id: companyId, goal_id: goalId,
+      start_date: startDate, end_date: endDate, base_amount: baseAmount, active: true,
+    }).select().single();
+    if (error || !schemeRow) { console.error("Failed to create reward scheme:", error); return; }
     const scheme = {
-      id: nextId("rwscheme"), deptId, companyId, goalId, startDate, endDate,
+      id: schemeRow.id, deptId, companyId, goalId, startDate, endDate,
       baseAmount, active: true,
       enrolledEmployeeIds: [],
       employeeOverrides: {}, // empId -> { updateAmount, remark }
@@ -1232,30 +1262,83 @@ function KPIApp() {
     setRewardSchemes((prev) => [...prev, scheme]);
     return scheme;
   };
-  const archiveRewardScheme = (schemeId) => setRewardSchemes((prev) => prev.map((s) => s.id === schemeId ? { ...s, active: false } : s));
-  const restoreRewardScheme = (schemeId) => setRewardSchemes((prev) => prev.map((s) => s.id === schemeId ? { ...s, active: true } : s));
-  const toggleRewardActive = (schemeId) => setRewardSchemes((prev) => prev.map((s) => s.id === schemeId ? { ...s, active: !s.active } : s));
+  const archiveRewardScheme = (schemeId) => {
+    setRewardSchemes((prev) => prev.map((s) => s.id === schemeId ? { ...s, active: false } : s));
+    supabaseClient.from("reward_schemes").update({ active: false }).eq("id", schemeId).then(({ error }) => { if (error) console.error("Failed to archive reward scheme:", error); });
+  };
+  const restoreRewardScheme = (schemeId) => {
+    setRewardSchemes((prev) => prev.map((s) => s.id === schemeId ? { ...s, active: true } : s));
+    supabaseClient.from("reward_schemes").update({ active: true }).eq("id", schemeId).then(({ error }) => { if (error) console.error("Failed to restore reward scheme:", error); });
+  };
+  const toggleRewardActive = (schemeId) => {
+    const scheme = rewardSchemes.find((s) => s.id === schemeId);
+    if (!scheme) return;
+    const nextActive = !scheme.active;
+    setRewardSchemes((prev) => prev.map((s) => s.id === schemeId ? { ...s, active: nextActive } : s));
+    supabaseClient.from("reward_schemes").update({ active: nextActive }).eq("id", schemeId).then(({ error }) => { if (error) console.error("Failed to toggle reward scheme:", error); });
+  };
 
-  const toggleRewardEnrollment = (schemeId, empId) => setRewardSchemes((prev) => prev.map((s) => {
-    if (s.id !== schemeId) return s;
-    const has = s.enrolledEmployeeIds.includes(empId);
-    return { ...s, enrolledEmployeeIds: has ? s.enrolledEmployeeIds.filter((id) => id !== empId) : [...s.enrolledEmployeeIds, empId] };
-  }));
+  // reward_enrollments has no separate "enrolled" flag — a row existing for (scheme_id, employee_id) IS
+  // the enrollment, and that same row holds the override amount/remark. So enrolling inserts a row
+  // (seeded with the scheme's current base amount) and un-enrolling deletes it outright.
+  const toggleRewardEnrollment = (schemeId, empId) => {
+    const scheme = rewardSchemes.find((s) => s.id === schemeId);
+    if (!scheme) return;
+    const has = scheme.enrolledEmployeeIds.includes(empId);
+    setRewardSchemes((prev) => prev.map((s) => {
+      if (s.id !== schemeId) return s;
+      if (has) {
+        const nextOverrides = { ...s.employeeOverrides };
+        delete nextOverrides[empId];
+        return { ...s, enrolledEmployeeIds: s.enrolledEmployeeIds.filter((id) => id !== empId), employeeOverrides: nextOverrides };
+      }
+      return { ...s, enrolledEmployeeIds: [...s.enrolledEmployeeIds, empId], employeeOverrides: { ...s.employeeOverrides, [empId]: { updateAmount: s.baseAmount, remark: "" } } };
+    }));
+    if (has) {
+      supabaseClient.from("reward_enrollments").delete().eq("scheme_id", schemeId).eq("employee_id", empId)
+        .then(({ error }) => { if (error) console.error("Failed to unenroll from reward scheme:", error); });
+    } else {
+      supabaseClient.from("reward_enrollments").insert({ scheme_id: schemeId, employee_id: empId, update_amount: scheme.baseAmount, remark: "" })
+        .then(({ error }) => { if (error) console.error("Failed to enroll in reward scheme:", error); });
+    }
+  };
 
-  const updateRewardEmployeeOverride = (schemeId, empId, patch) => setRewardSchemes((prev) => prev.map((s) => {
-    if (s.id !== schemeId) return s;
-    const cur = s.employeeOverrides[empId] || { updateAmount: s.baseAmount, remark: "" };
-    return { ...s, employeeOverrides: { ...s.employeeOverrides, [empId]: { ...cur, ...patch } } };
-  }));
+  // Editing an override implicitly enrolls the employee too (same row-presence rule as above) — the
+  // admin UI lets you type an amount before ticking the enrollment checkbox, so this has to cover that.
+  const updateRewardEmployeeOverride = (schemeId, empId, patch) => {
+    const scheme = rewardSchemes.find((s) => s.id === schemeId);
+    if (!scheme) return;
+    const cur = scheme.employeeOverrides[empId] || { updateAmount: scheme.baseAmount, remark: "" };
+    const merged = { ...cur, ...patch };
+    const alreadyEnrolled = scheme.enrolledEmployeeIds.includes(empId);
+    setRewardSchemes((prev) => prev.map((s) => {
+      if (s.id !== schemeId) return s;
+      return {
+        ...s,
+        enrolledEmployeeIds: alreadyEnrolled ? s.enrolledEmployeeIds : [...s.enrolledEmployeeIds, empId],
+        employeeOverrides: { ...s.employeeOverrides, [empId]: merged },
+      };
+    }));
+    supabaseClient.from("reward_enrollments").upsert({
+      scheme_id: schemeId, employee_id: empId, update_amount: merged.updateAmount, remark: merged.remark,
+    }, { onConflict: "scheme_id,employee_id" }).then(({ error }) => { if (error) console.error("Failed to update reward override:", error); });
+  };
 
   // Edit scope mirrors the goal-edit modal: "current" applies now but auto-reverts next month;
   // "currentAndFuture" applies now and stays. Nothing here ever touches already-approved goal data —
   // the scheme only controls the base amount, not the underlying task approvals.
+  // Note: as in the original prototype, future_base_amount/future_effective_month are only ever written
+  // here, not read back anywhere — there's no rollover job for reward schemes (unlike goals' monthly
+  // rollover), so the "reverts next month" promise in the notify() below isn't actually enforced yet.
+  // Carried over as-is per the decision to wire the existing behavior rather than build new behavior.
   const commitRewardSchemeEdit = (schemeId, newBaseAmount, scope) => {
     const scheme = rewardSchemes.find((s) => s.id === schemeId);
     if (!scheme) return;
     const cur = currentIsoMonth();
     const nxt = nextIsoMonth(cur);
+    const dbPatch = scope === "current"
+      ? { base_amount: newBaseAmount, future_base_amount: scheme.baseAmount, future_effective_month: nxt }
+      : { base_amount: newBaseAmount, future_base_amount: null, future_effective_month: null };
     setRewardSchemes((prev) => prev.map((s) => {
       if (s.id !== schemeId) return s;
       if (scope === "current") {
@@ -1263,6 +1346,7 @@ function KPIApp() {
       }
       return { ...s, baseAmount: newBaseAmount, futureBaseAmount: null, futureEffectiveMonth: null };
     }));
+    supabaseClient.from("reward_schemes").update(dbPatch).eq("id", schemeId).then(({ error }) => { if (error) console.error("Failed to update reward scheme:", error); });
     notify(`Reward scheme updated${scope === "current" ? " for this month only — reverts next month" : " going forward"}.`);
   };
 
@@ -1426,8 +1510,16 @@ function OtpBoxes({ length = 6, value, onChange, onComplete, disabled }) {
     refs.current[Math.min(text.length, length - 1)]?.focus();
   };
 
+  // 6 digits reads fine as one row. 8 is wide enough that a single row either overflows on
+  // phones or wraps into an ugly "7 then 1 orphan" line, so anything longer than 6 lays out
+  // as a clean, centered 4-per-row grid instead (2 even rows of 4).
+  const isLong = length > 6;
+
   return (
-    <div className="flex gap-2 justify-center" onPaste={handlePaste}>
+    <div
+      className={isLong ? "grid grid-cols-4 gap-2.5 justify-items-center max-w-[280px] mx-auto" : "flex gap-2 justify-center"}
+      onPaste={handlePaste}
+    >
       {digits.map((d, i) => (
         <input
           key={i}
@@ -1438,7 +1530,10 @@ function OtpBoxes({ length = 6, value, onChange, onComplete, disabled }) {
           onKeyDown={(e) => handleKeyDown(i, e)}
           inputMode="numeric"
           maxLength={1}
-          className="w-11 h-12 text-center text-lg font-semibold rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-teal-600"
+          className={
+            (isLong ? "w-full aspect-square text-base" : "w-11 h-12 text-lg") +
+            " text-center font-semibold rounded-lg border border-slate-200 shadow-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-teal-600 focus:border-teal-600 transition-shadow"
+          }
         />
       ))}
     </div>
@@ -1495,7 +1590,14 @@ function LoginScreen({ onLogin }) {
     setResetError("");
     if (!resetEmail.trim()) { setResetError("Enter your email."); return; }
     setResetBusy(true);
-    const { error: resetErr } = await supabaseClient.auth.resetPasswordForEmail(resetEmail.trim());
+    // redirectTo: without this, Supabase sends people to whatever "Site URL" is set in the
+    // dashboard (Authentication > URL Configuration) when they click the emailed link — which
+    // was pointing at the main company site instead of this app. Pointing it at the app's own
+    // URL fixes that, but it only works if this exact URL is ALSO added to the "Redirect URLs"
+    // allow list in that same dashboard page — otherwise Supabase silently falls back to Site URL.
+    const { error: resetErr } = await supabaseClient.auth.resetPasswordForEmail(resetEmail.trim(), {
+      redirectTo: window.location.origin + window.location.pathname,
+    });
     setResetBusy(false);
     if (resetErr) { setResetError(resetErr.message); return; }
     setCode("");
@@ -1505,7 +1607,9 @@ function LoginScreen({ onLogin }) {
 
   const verifyCode = async (fullCode) => {
     const codeToCheck = fullCode ?? code;
-    if (codeToCheck.length !== 6) { setCodeError("Enter all 6 digits."); return; }
+    // This project's Supabase instance sends 8-digit recovery codes (not Supabase's usual 6),
+    // so both this check and the <OtpBoxes length={8}> below must match that actual length.
+    if (codeToCheck.length !== 8) { setCodeError("Enter all 8 digits."); return; }
     setCodeError("");
     setCodeBusy(true);
     const { error: verifyError } = await supabaseClient.auth.verifyOtp({ email: resetEmail.trim(), token: codeToCheck, type: "recovery" });
@@ -1562,7 +1666,7 @@ function LoginScreen({ onLogin }) {
                 className="w-full px-3 py-2.5 pr-10 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-600"
               />
               <button type="button" onClick={() => setShowPassword((s) => !s)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
-                {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                {showPassword ? <Eye size={15} /> : <EyeOff size={15} />}
               </button>
             </div>
             <label className="flex items-center gap-2 mb-1.5 cursor-pointer select-none">
@@ -1610,7 +1714,7 @@ function LoginScreen({ onLogin }) {
             <p className="text-sm font-semibold text-slate-800 mb-1">Enter the code</p>
             <p className="text-xs text-slate-500 mb-4">Sent to {resetEmail.trim()} — expires shortly, so enter it soon.</p>
             <div className="mb-4">
-              <OtpBoxes value={code} onChange={setCode} onComplete={verifyCode} disabled={codeBusy} />
+              <OtpBoxes length={8} value={code} onChange={setCode} onComplete={verifyCode} disabled={codeBusy} />
             </div>
             {codeError && <p className="text-xs text-rose-500 mb-3 text-center">{codeError}</p>}
             <button onClick={() => verifyCode()} disabled={codeBusy} className="w-full py-2.5 rounded-lg bg-slate-900 text-white text-sm font-medium disabled:opacity-60 mb-2">
@@ -1633,7 +1737,7 @@ function LoginScreen({ onLogin }) {
                 className="w-full px-3 py-2.5 pr-10 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-600"
               />
               <button type="button" onClick={() => setShowPassword((s) => !s)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
-                {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                {showPassword ? <Eye size={15} /> : <EyeOff size={15} />}
               </button>
             </div>
             <label className="block text-xs font-medium text-slate-500 mb-1.5">Confirm new password</label>
@@ -1693,7 +1797,7 @@ function SetNewPasswordScreen({ onDone }) {
               className="w-full px-3 py-2.5 pr-10 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-600"
             />
             <button type="button" onClick={() => setShowPassword((s) => !s)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
-              {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+              {showPassword ? <Eye size={15} /> : <EyeOff size={15} />}
             </button>
           </div>
           <label className="block text-xs font-medium text-slate-500 mb-1.5">Confirm new password</label>
@@ -1819,7 +1923,7 @@ function ChangePasswordModal({ onClose }) {
                 className="w-full px-3 py-2.5 pr-10 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-600"
               />
               <button type="button" onClick={() => setShowPassword((s) => !s)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
-                {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                {showPassword ? <Eye size={15} /> : <EyeOff size={15} />}
               </button>
             </div>
             <label className="block text-xs font-medium text-slate-500 mb-1.5">Confirm new password</label>
@@ -2966,7 +3070,7 @@ function AdminResetPasswordModal({ employee, resetEmployeePassword, notify, onCl
                 className="w-full px-3 py-2.5 pr-10 rounded-lg border border-slate-200 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-teal-600"
               />
               <button type="button" onClick={() => setShowPassword((s) => !s)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
-                {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                {showPassword ? <Eye size={15} /> : <EyeOff size={15} />}
               </button>
             </div>
             <button type="button" onClick={randomPassword} className="text-[11px] text-teal-700 hover:underline mb-4 block">Generate a random password</button>
@@ -3994,6 +4098,14 @@ function AdminRewards({ companies, activeCompanyId, switchCompany, departments, 
 
 function NewRewardSchemeForm({ deptId, companyId, goals, addRewardScheme, notify, onDone }) {
   const [goalId, setGoalId] = useState(goals[0]?.id || "");
+  // Defends against goalId going stale if `goals` wasn't ready at mount (or the department filter
+  // changes underneath this form): keeps it pointed at a real option instead of silently holding an
+  // empty string forever while the <select> visually shows the first option anyway (a browser default
+  // when the current value matches none of the <option>s — masking the fact that Create scheme was
+  // quietly doing nothing).
+  useEffect(() => {
+    if (!goals.some((g) => g.id === goalId)) setGoalId(goals[0]?.id || "");
+  }, [goals]);
   const now = new Date();
   const [startDate, setStartDate] = useState(isoDate(new Date(now.getFullYear(), 0, 1)));
   const [endDate, setEndDate] = useState(isoDate(new Date(now.getFullYear(), 11, 31)));
@@ -4012,7 +4124,7 @@ function NewRewardSchemeForm({ deptId, companyId, goals, addRewardScheme, notify
   };
 
   const submit = () => {
-    if (!goalId) return;
+    if (!goalId) { notify("Pick a goal to reward first."); return; }
     addRewardScheme(deptId, companyId, goalId, startDate, endDate, baseAmount);
     notify("Reward scheme created");
     onDone();
@@ -4219,54 +4331,190 @@ function RewardSchemeDetail({ scheme, dept, employees, goals, toggleRewardActive
   );
 }
 
-function AdminReports({ companies, activeCompanyId, switchCompany, departments, employees, employeePoints, employeeGoals, getRecord }) {
+// ---- Vimigo-format Excel export (see vimigo-reference-report-formats.md for the target column
+// layouts Belle sent over) ----
+// Both report shapes below reuse AdminApprovals' exact month-resolution logic (isAnnual ->
+// getMonthView; one-off goal -> direct startDate match) so a report for an arbitrary past/future
+// month reflects what was actually live that month, not just the goal's current live-month
+// tasks/records — annual goals in particular would otherwise show today's task set mislabeled as
+// whatever month the admin picked.
+const BLANK_RECORD = { done: false, approval: "none", remark: "", adminRemark: "", submittedAt: null, awardedPoints: null, awardedWeight: null, attachment: null, noAttachmentReason: false };
+
+function monthRowsForGoal(goal, isoMonth, getRecord, getMonthView) {
+  let tasksForMonth, assignedForMonth, isActionable, recordsForMonth;
+  if (goal.isAnnual) {
+    const view = getMonthView(goal, isoMonth);
+    if (view.status === "scheduled" || view.status === "inherited") return null; // hasn't happened yet
+    tasksForMonth = view.tasks; assignedForMonth = view.assignedEmployeeIds;
+    isActionable = view.status === "live";
+    recordsForMonth = view.records || null;
+  } else {
+    if (goal.startDate.slice(0, 7) !== isoMonth) return null;
+    tasksForMonth = goal.tasks; assignedForMonth = goal.assignedEmployeeIds;
+    isActionable = true;
+  }
+  return assignedForMonth.map((empId) => ({
+    empId,
+    taskRows: tasksForMonth.map((task) => ({
+      task,
+      rec: isActionable ? getRecord(empId, goal.id, task.id) : (recordsForMonth?.[empId]?.[task.id] || BLANK_RECORD),
+    })),
+  }));
+}
+
+// Approved tasks score using their FROZEN weight/points (as approved) — same rule employeePoints
+// uses, so a later change to a task's live weight never retroactively rewrites a closed month's
+// report. Everything not approved (submitted-and-pending, or never touched) scores against the live
+// task weight; Scorecard has no "rejected" state so both bucket as "open" here.
+function scoreTask(task, rec) {
+  if (rec.approval === "approved") {
+    const achievable = rec.awardedWeight ?? task.weight;
+    return { achievable, awarded: rec.awardedPoints ?? achievable, bucket: "approved" };
+  }
+  return { achievable: task.weight, awarded: null, bucket: "open" };
+}
+
+// Report 1 — "Performance by Month, Grouped by vimiGoal": one row per employee per goal per month.
+function buildGroupedRows(deptsInCompany, goals, empById, isoMonth, getRecord, getMonthView, deptFilter) {
+  const rows = [];
+  deptsInCompany.filter((d) => deptFilter === "all" || d.id === deptFilter).forEach((dept) => {
+    goals.filter((g) => g.deptId === dept.id && g.active !== false).forEach((goal) => {
+      const perEmp = monthRowsForGoal(goal, isoMonth, getRecord, getMonthView);
+      if (!perEmp) return;
+      perEmp.forEach(({ empId, taskRows }) => {
+        const emp = empById[empId];
+        if (!emp || taskRows.length === 0) return;
+        let completedScore = 0, totalScore = 0, completedGoals = 0, approved = 0;
+        taskRows.forEach(({ task, rec }) => {
+          const { achievable, awarded, bucket } = scoreTask(task, rec);
+          totalScore += achievable;
+          if (bucket === "approved") { completedScore += awarded; approved += 1; }
+          if (rec.done) completedGoals += 1;
+        });
+        const totalGoals = taskRows.length;
+        const completion = totalScore > 0 ? Math.round((completedScore / totalScore) * 1000) / 10 : 0;
+        // Belle chose (2026-09-21) to keep task weights flexible per goal rather than forcing them to
+        // sum to 100 like Vimigo's own sample data — so unlike Vimigo, "Total Score" here shows the
+        // goal's real achievable total, not always 100. Everything else about the column layout matches.
+        rows.push({
+          Month: monthLabel(isoMonth), "Full Name": emp.name, Department: dept.name, "vimiGoal Name": goal.name,
+          Period: "Monthly", "Completion (%)": completion, "Completed Score": completedScore, "Total Score": totalScore,
+          "Completed Goals": completedGoals, "Total Goals": totalGoals, Approved: approved, Pending: totalGoals - approved, Rejected: 0,
+        });
+      });
+    });
+  });
+  return rows;
+}
+
+// Scorecard's approval states are approved/pending/none — Vimigo's sample only shows
+// Approved/In-Progress/Rejected. "pending" (submitted, awaiting approval) maps to "In-Progress";
+// Scorecard has no reject concept, so "none" (never submitted) gets its own "Not Started" label
+// rather than being force-fit into "Rejected", which would misleadingly read as staff work having
+// been turned down rather than simply not attempted yet. Flagged for Belle to correct if she'd
+// rather these rows were left out of the Details Report entirely.
+const APPROVAL_LABEL = { approved: "Approved", pending: "In-Progress", none: "Not Started" };
+
+// Report 2 — "Details Report": one row per task, per employee, per month.
+function buildDetailRows(deptsInCompany, goals, empById, isoMonth, getRecord, getMonthView, deptFilter) {
+  const [y, m] = isoMonth.split("-").map(Number);
+  const periodStart = isoDate(new Date(y, m - 1, 1));
+  const periodEnd = isoDate(new Date(y, m, 0));
+
+  // The Details Report repeats the employee's OVERALL completion (across every goal they have that
+  // month, not just the one goal a given row belongs to) on every row — computed once per employee
+  // up front rather than per-row.
+  const overallByEmp = {};
+  deptsInCompany.forEach((dept) => {
+    goals.filter((g) => g.deptId === dept.id && g.active !== false).forEach((goal) => {
+      const perEmp = monthRowsForGoal(goal, isoMonth, getRecord, getMonthView);
+      if (!perEmp) return;
+      perEmp.forEach(({ empId, taskRows }) => {
+        const bucket = overallByEmp[empId] || (overallByEmp[empId] = { awarded: 0, capacity: 0 });
+        taskRows.forEach(({ task, rec }) => {
+          const { achievable, awarded, bucket: b } = scoreTask(task, rec);
+          bucket.capacity += achievable;
+          if (b === "approved") bucket.awarded += awarded;
+        });
+      });
+    });
+  });
+  const overallPct = (empId) => {
+    const b = overallByEmp[empId];
+    return b && b.capacity > 0 ? Math.round((b.awarded / b.capacity) * 1000) / 10 : 0;
+  };
+
+  const rows = [];
+  deptsInCompany.filter((d) => deptFilter === "all" || d.id === deptFilter).forEach((dept) => {
+    goals.filter((g) => g.deptId === dept.id && g.active !== false).forEach((goal) => {
+      const perEmp = monthRowsForGoal(goal, isoMonth, getRecord, getMonthView);
+      if (!perEmp) return;
+      perEmp.forEach(({ empId, taskRows }) => {
+        const emp = empById[empId];
+        if (!emp) return;
+        taskRows.forEach(({ task, rec }) => {
+          const { achievable, awarded } = scoreTask(task, rec);
+          const submittedAt = rec.submittedAt ? new Date(rec.submittedAt) : null;
+          rows.push({
+            "Period Start Date": periodStart, "Period End Date": periodEnd, Period: "Monthly",
+            "Full Name": emp.name, Department: dept.name, "vimiGoal Set": goal.name, Goal: task.text,
+            // Scorecard tasks have no separate description field distinct from their name — left blank
+            // rather than duplicating "Goal" into it.
+            Description: "",
+            "Achievable Points": achievable,
+            // Vimigo lets staff self-report a points value on submission; Scorecard is binary
+            // done/not-done, so per the 2026-09-21 decision this is backfilled as the full achievable
+            // amount once the task is actually done, blank otherwise (not a real self-report feature).
+            "User Submitted Points": rec.done ? achievable : "",
+            Remarks: rec.remark || "",
+            "Admin Approved Points": rec.approval === "approved" ? awarded : "",
+            "Approval Status": APPROVAL_LABEL[rec.approval] || rec.approval,
+            "Completed Date": submittedAt ? isoDate(submittedAt) : "",
+            "Completed Time": submittedAt ? submittedAt.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "",
+            "Completion (%)": overallPct(empId),
+            // Scorecard tracks rewards separately (reward_schemes/reward_enrollments), not per-task —
+            // left blank rather than guessing at a cross-reference.
+            Rewards: "",
+            "vimiGoal Settings Status": goal.active === false ? "Archived" : "Active",
+          });
+        });
+      });
+    });
+  });
+  return rows;
+}
+
+function AdminReports({ companies, activeCompanyId, switchCompany, departments, employees, goals, getRecord, getMonthView }) {
   const deptsInCompany = departments.filter((d) => d.active !== false && d.companyId === activeCompanyId);
-  const companyEmployeeIds = new Set(deptsInCompany.map((d) => d.id));
   const [deptFilter, setDeptFilter] = useState("all");
   const [isoMonth, setIsoMonth] = useState(currentIsoMonth());
-  const month = monthLabel(isoMonth);
+  const [view, setView] = useState("summary"); // which shape to preview on-screen; download always includes both sheets
 
   useEffect(() => { setDeptFilter("all"); }, [activeCompanyId]);
 
-  const buildRows = () =>
-    employees
-      .filter((e) => companyEmployeeIds.has(e.deptId) && (deptFilter === "all" || e.deptId === deptFilter))
-      .map((e) => {
-        const dept = departments.find((d) => d.id === e.deptId);
-        const pts = employeePoints(e.id);
-        let approvedCount = 0, pendingCount = 0;
-        const remarksThisMonth = [];
-        employeeGoals(e.id).forEach((goal) => {
-          goal.tasks.forEach((t) => {
-            const r = getRecord(e.id, goal.id, t.id);
-            if (r.approval === "approved") approvedCount++;
-            else if (r.approval === "pending") pendingCount++;
-            if (r.remark && r.remark.trim()) remarksThisMonth.push(r.remark.trim());
-          });
-        });
-        return {
-          Period: month,
-          Department: dept.name,
-          Employee: e.name,
-          Score: `${pts.percentage}%`,
-          Remarks: remarksThisMonth.length ? remarksThisMonth.join(" · ") : "—",
-          "Goals Approved": approvedCount,
-          "Goals Pending": pendingCount,
-        };
-      });
+  const empById = {};
+  employees.forEach((e) => (empById[e.id] = e));
 
-  const rows = buildRows();
+  const summaryRows = buildGroupedRows(deptsInCompany, goals, empById, isoMonth, getRecord, getMonthView, deptFilter);
+  const detailRows = buildDetailRows(deptsInCompany, goals, empById, isoMonth, getRecord, getMonthView, deptFilter);
+  const rows = view === "summary" ? summaryRows : detailRows;
 
   const downloadExcel = () => {
-    const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Goal Performance");
-    XLSX.writeFile(wb, `vimiGoal-Performance-${month.replace(/\s+/g, "-")}.xlsx`);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), "Performance by Month");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detailRows), "Details Report");
+    XLSX.writeFile(wb, `vimiGoal-Report-${monthLabel(isoMonth).replace(/\s+/g, "-")}.xlsx`);
   };
+
+  // Preview tables show a trimmed column set for on-screen width — the actual download always has
+  // every column (Description/Rewards/vimiGoal Settings Status included) regardless of this preview.
+  const summaryCols = ["Month", "Full Name", "Department", "vimiGoal Name", "Period", "Completion (%)", "Completed Score", "Total Score", "Completed Goals", "Total Goals", "Approved", "Pending", "Rejected"];
+  const detailCols = ["Period Start Date", "Period End Date", "Full Name", "Department", "vimiGoal Set", "Goal", "Achievable Points", "User Submitted Points", "Remarks", "Admin Approved Points", "Approval Status", "Completed Date", "Completion (%)"];
+  const cols = view === "summary" ? summaryCols : detailCols;
 
   return (
     <div>
-      <SectionTitle sub="Preview the report, then download it as an Excel spreadsheet.">Reports</SectionTitle>
+      <SectionTitle sub="Matches Vimigo's export column layout — one workbook, two sheets: a monthly summary and a per-task details report.">Reports</SectionTitle>
       <CompanyTabs companies={companies} activeCompanyId={activeCompanyId} switchCompany={switchCompany} />
       <div className="bg-white rounded-xl border border-slate-200 p-5 mb-4">
         <div className="grid grid-cols-2 gap-3 mb-4">
@@ -4276,33 +4524,29 @@ function AdminReports({ companies, activeCompanyId, switchCompany, departments, 
             {deptsInCompany.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
           </select>
         </div>
-        <button onClick={downloadExcel} className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-teal-600 text-white text-sm font-semibold"><FileSpreadsheet size={16} />Download as Excel</button>
+        <button onClick={downloadExcel} className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-teal-600 text-white text-sm font-semibold"><FileSpreadsheet size={16} />Download as Excel (both sheets)</button>
       </div>
 
-      <p className="text-xs uppercase tracking-wide text-slate-400 font-medium mb-2 px-1">Preview</p>
+      <div className="flex bg-slate-100 rounded-lg p-1 mb-3 max-w-sm">
+        <button onClick={() => setView("summary")} className={`flex-1 py-1.5 rounded-md text-xs font-medium ${view === "summary" ? "bg-white shadow-sm text-slate-900" : "text-slate-500"}`}>Performance by Month</button>
+        <button onClick={() => setView("detail")} className={`flex-1 py-1.5 rounded-md text-xs font-medium ${view === "detail" ? "bg-white shadow-sm text-slate-900" : "text-slate-500"}`}>Details Report</button>
+      </div>
+
+      <p className="text-xs uppercase tracking-wide text-slate-400 font-medium mb-2 px-1">Preview ({rows.length} row{rows.length === 1 ? "" : "s"})</p>
       <div className="bg-white rounded-xl border border-slate-200 overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className="w-full text-sm" style={{ minWidth: 900 }}>
           <thead>
             <tr className="border-b border-slate-100 bg-slate-50/60 text-left text-slate-500">
-              <th className="px-3 py-2 font-medium whitespace-nowrap">Period</th>
-              <th className="px-3 py-2 font-medium whitespace-nowrap">Department</th>
-              <th className="px-3 py-2 font-medium whitespace-nowrap">Employee</th>
-              <th className="px-3 py-2 font-medium whitespace-nowrap">Score</th>
-              <th className="px-3 py-2 font-medium">Remarks</th>
-              <th className="px-3 py-2 font-medium text-center whitespace-nowrap">Approved</th>
-              <th className="px-3 py-2 font-medium text-center whitespace-nowrap">Pending</th>
+              {cols.map((c) => <th key={c} className="px-3 py-2 font-medium whitespace-nowrap">{c}</th>)}
             </tr>
           </thead>
           <tbody>
+            {rows.length === 0 && (
+              <tr><td colSpan={cols.length} className="px-3 py-8 text-center text-slate-400 text-sm">No data for this month.</td></tr>
+            )}
             {rows.map((r, idx) => (
               <tr key={idx} className="border-b border-slate-50 last:border-0">
-                <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{r.Period}</td>
-                <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{r.Department}</td>
-                <td className="px-3 py-2 font-medium text-slate-700 whitespace-nowrap">{r.Employee}</td>
-                <td className="px-3 py-2 font-mono text-xs whitespace-nowrap">{r.Score}</td>
-                <td className="px-3 py-2 text-slate-500 max-w-xs truncate">{r.Remarks}</td>
-                <td className="px-3 py-2 text-center font-mono text-xs text-emerald-600">{r["Goals Approved"]}</td>
-                <td className="px-3 py-2 text-center font-mono text-xs text-amber-600">{r["Goals Pending"]}</td>
+                {cols.map((c) => <td key={c} className="px-3 py-2 text-slate-600 whitespace-nowrap max-w-xs truncate">{String(r[c] ?? "")}</td>)}
               </tr>
             ))}
           </tbody>
