@@ -111,69 +111,10 @@ const MessageCircle = (p) => <IconBase {...p}><path d="M21 11.5a8.38 8.38 0 0 1-
 const Sliders = (p) => <IconBase {...p}><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></IconBase>;
 
 // ---------------- Seed data ----------------
-
-const COMPANIES_SEED = [
-  { id: "zhotel", name: "ZHotel", active: true },
-  { id: "ingenious", name: "Ingenious", active: true },
-];
-
-const DEPARTMENTS_SEED = [
-  { id: "sales", name: "Sales", color: "teal", companyId: "ingenious", active: true },
-  { id: "hr", name: "HR", color: "rose", companyId: "ingenious", active: true },
-  { id: "it", name: "IT Support", color: "indigo", companyId: "ingenious", active: true },
-  { id: "marketing", name: "Marketing", color: "amber", companyId: "ingenious", active: true },
-  { id: "finance", name: "Finance", color: "emerald", companyId: "ingenious", active: true },
-  { id: "ops", name: "Operations", color: "slate", companyId: "ingenious", active: true },
-  { id: "frontoffice", name: "Front Office", color: "sky", companyId: "zhotel", active: true },
-  { id: "housekeeping", name: "Housekeeping", color: "violet", companyId: "zhotel", active: true },
-  { id: "fnb", name: "F&B", color: "orange", companyId: "zhotel", active: true },
-];
-
-const DEPT_COUNT = { sales: 10, hr: 6, it: 8, marketing: 8, finance: 9, ops: 9, frontoffice: 5, housekeeping: 5, fnb: 4 };
-
-const FIRST = ["Aiden","Mei","Farah","Kai","Priya","Noah","Aisyah","Lucas","Sofia","Ravi","Hana","Ethan","Zara","Marcus","Nadia","Leo","Yasmin","Omar","Chloe","Iman","Daniel","Wei","Lily","Amir","Grace","Hakim","Ivy","Samuel","Aina","Ben","Farid","Nur","Jason","Alya","Ken","Siti","Ryan","Dewi","Adam","Mira","Faiz","Elena","Tariq","Sara","Vikram","Anna","Zack","Nina","Danish","Maya","Bella","Firdaus","Joyce","Hafiz","Wendy","Iskandar","Cheryl","Zulkifli"];
-const LAST = ["Lim","Rahman","Tan","Kaur","Wong","Ibrahim","Chen","Osman","Lee","Hassan","Ng","Aziz","Yusof","Chua","Ismail","Goh","Idris","Ong","Bakar","Teo"];
-
-const DEMO_PASSWORD = "welcome123";
-
-function buildEmployees() {
-  let i = 0;
-  const employees = [];
-  DEPARTMENTS_SEED.forEach((dept) => {
-    for (let n = 0; n < DEPT_COUNT[dept.id]; n++) {
-      const first = FIRST[i % FIRST.length];
-      const last = LAST[(i * 3 + 1) % LAST.length];
-      const email = `${first}.${last}@company.com`.toLowerCase();
-      employees.push({ id: `emp-${i}`, name: `${first} ${last}`, email, password: DEMO_PASSWORD, role: "staff", deptId: dept.id, active: true });
-      i++;
-    }
-  });
-  return employees;
-}
-
-const BASELINE_TASKS = {
-  sales: [{ text: "Hit monthly sales target", weight: 40 }, { text: "Update CRM records daily", weight: 40 }, { text: "Submit weekly pipeline report", weight: 50 }, { text: "Submit customer Google review screenshot", weight: 20, requiresAttachment: true }],
-  hr: [{ text: "Close open roles within SLA", weight: 40 }, { text: "Run onboarding for new hires", weight: 30 }, { text: "Complete quarterly engagement survey", weight: 30, requiresAttachment: true }],
-  it: [{ text: "Resolve tickets within 24h", weight: 40 }, { text: "Patch systems on schedule", weight: 30 }, { text: "Keep asset inventory current", weight: 30 }],
-  marketing: [{ text: "Publish content calendar on time", weight: 30 }, { text: "Hit campaign lead targets", weight: 40 }, { text: "Report channel performance weekly", weight: 30 }, { text: "Upsell add-on package to client", weight: 25, requiresAttachment: true, requiresRemark: true }],
-  finance: [{ text: "Close monthly books by day 5", weight: 40 }, { text: "Reconcile accounts weekly", weight: 30 }, { text: "Submit budget variance report", weight: 30 }],
-  ops: [{ text: "Maintain vendor SLAs", weight: 40 }, { text: "Run weekly safety checklist", weight: 30 }, { text: "Track inventory accuracy", weight: 30 }],
-  frontoffice: [{ text: "Maintain guest check-in SLA under 5 min", weight: 40 }, { text: "Upsell room upgrades", weight: 30 }, { text: "Log daily occupancy report", weight: 30 }],
-  housekeeping: [{ text: "Complete room turnover within schedule", weight: 40 }, { text: "Pass daily inspection checklist", weight: 30 }, { text: "Report maintenance issues promptly", weight: 30 }],
-  fnb: [{ text: "Hit daily covers target", weight: 40 }, { text: "Maintain food safety checklist", weight: 30, requiresAttachment: true }, { text: "Submit weekly wastage report", weight: 30 }],
-};
-
-const EXTRA_GOAL = {
-  sales: { name: "Q3 Key Accounts Push", desc: "Focused push on top-tier accounts for Q3.", tasks: [{ text: "Close 2 enterprise deals", weight: 60 }, { text: "Deliver client QBR deck", weight: 40 }], endsPast: false },
-  hr: { name: "Engagement Survey Rollout", desc: "Company-wide engagement survey for this cycle.", tasks: [{ text: "Launch survey company-wide", weight: 50 }, { text: "Compile results report", weight: 50 }], endsPast: false },
-  it: { name: "Server Migration Project", desc: "Migrate legacy infrastructure to the new cloud stack.", tasks: [{ text: "Migrate legacy DB", weight: 50 }, { text: "Document new architecture", weight: 50 }], endsPast: true },
-  marketing: { name: "Product Launch Campaign", desc: "Cross-channel push for the new product launch.", tasks: [{ text: "Produce launch video", weight: 50 }, { text: "Coordinate influencer outreach", weight: 50 }], endsPast: false },
-  finance: { name: "Year-End Audit Prep", desc: "Prepare books and files ahead of the annual audit.", tasks: [{ text: "Reconcile Q2 ledger", weight: 50 }, { text: "Prepare audit file", weight: 50 }], endsPast: false },
-  ops: { name: "Warehouse Safety Overhaul", desc: "Refresh safety signage and retrain the floor team.", tasks: [{ text: "Update safety signage", weight: 50 }, { text: "Run safety training session", weight: 50 }], endsPast: true },
-  frontoffice: { name: "Guest Experience Push", desc: "Lift guest satisfaction scores this quarter.", tasks: [{ text: "Achieve 90%+ guest satisfaction score", weight: 60 }, { text: "Resolve guest complaints same-day", weight: 40 }], endsPast: false },
-  housekeeping: { name: "Deep Clean Rollout", desc: "Seasonal deep-clean program across all rooms.", tasks: [{ text: "Complete deep clean on assigned floor", weight: 50 }, { text: "Submit before/after photos", weight: 50 }], endsPast: false },
-  fnb: { name: "Menu Relaunch Support", desc: "Support the new seasonal menu rollout.", tasks: [{ text: "Complete new menu training", weight: 50 }, { text: "Log customer feedback on new dishes", weight: 50 }], endsPast: true },
-};
+// (The old in-memory demo generators — COMPANIES_SEED, DEPARTMENTS_SEED, buildEmployees, BASELINE_TASKS,
+// EXTRA_GOAL, buildSeedState — were removed 2026-09-29 as part of Phase 10 cleanup. Every one of them was
+// confirmed dead: not called anywhere once companies/departments/employees/goals/records all load for real
+// from Supabase. See scorecard-rls-status.md, Phase 10, for the removal note.)
 
 const COLOR_MAP = {
   teal: { bg: "bg-teal-500", light: "bg-teal-50", text: "text-teal-700", border: "border-teal-200" },
@@ -249,153 +190,6 @@ const compareIsoMonth = (a, b) => a === b ? 0 : (a < b ? -1 : 1);
 let idCounter = 10000;
 const nextId = (prefix) => `${prefix}-${idCounter++}`;
 
-// ---------------- Seed builder for goals / records / checkins / reviews / rewards ----------------
-
-function buildSeedState(employees) {
-  const today = new Date();
-  const goals = [];
-  const goalRecords = {};
-  const checkins = [];
-  const reviews = [];
-  const rewards = [];
-
-  const setRecord = (empId, goalId, taskId, patch) => {
-    const k = `${empId}::${goalId}::${taskId}`;
-    goalRecords[k] = { done: false, approval: "none", remark: "", adminRemark: "", submittedAt: null, awardedPoints: null, attachment: null, noAttachmentReason: false, ...patch };
-  };
-
-  DEPARTMENTS_SEED.forEach((dept) => {
-    const deptEmployees = employees.filter((e) => e.deptId === dept.id);
-
-    // Baseline "team goal" — assigned to everyone in the department, the quick department-wide scorecard.
-    // This is the goal type that follows the annual-with-monthly-repeat model: `tasks`/`assignedEmployeeIds`
-    // represent the LIVE current month; `monthlyHistory` holds frozen past months; `futureVersions` holds
-    // changes management has already scheduled for months ahead. startDate/endDate span the WHOLE annual
-    // range (used to generate month tabs) — not just the current month.
-    const annualSpanStart = isoDate(new Date(today.getFullYear(), 0, 1));
-    const annualSpanEnd = isoDate(new Date(today.getFullYear(), 11, 31));
-    const currentTasks = BASELINE_TASKS[dept.id].map((t) => ({ id: nextId("task"), text: t.text, weight: t.weight, requiresAttachment: !!t.requiresAttachment, requiresRemark: !!t.requiresRemark }));
-    const currentAssigned = deptEmployees.map((e) => e.id);
-    const baseline = {
-      id: nextId("goal"),
-      deptId: dept.id,
-      name: `${dept.name} Team Goal — ${today.getFullYear()}`,
-      description: `Core monthly scorecard for the whole ${dept.name} team.`,
-      isTeamGoal: true,
-      autoAssignWholeDept: true,
-      isAnnual: true,
-      active: true,
-      startDate: annualSpanStart,
-      endDate: annualSpanEnd,
-      reviewCutoffOffsetDays: 5,
-      tasks: currentTasks,
-      assignedEmployeeIds: currentAssigned,
-      monthlyHistory: {},
-      futureVersions: [],
-    };
-
-    // Seed frozen history for every month from January up to (not including) the current month
-    const curIsoMonth = currentIsoMonth();
-    monthsInRange(annualSpanStart, annualSpanEnd).filter((m) => m < curIsoMonth).forEach((histMonth, monthIdx) => {
-      const histTasks = currentTasks; // same task definitions carried back for simplicity of the demo
-      const records = {};
-      currentAssigned.forEach((empId, empIdx) => {
-        records[empId] = {};
-        histTasks.forEach((task, taskIdx) => {
-          const roll = (empIdx * 5 + taskIdx * 11 + monthIdx * 3 + dept.id.length) % 10;
-          if (roll < 6) records[empId][task.id] = { done: true, approval: "approved", awardedPoints: task.weight };
-          else if (roll < 8) records[empId][task.id] = { done: true, approval: "approved", awardedPoints: Math.round(task.weight * 0.6) };
-          else records[empId][task.id] = { done: false, approval: "none", awardedPoints: null };
-        });
-      });
-      baseline.monthlyHistory[histMonth] = { tasks: histTasks, assignedEmployeeIds: currentAssigned, records };
-    });
-    goals.push(baseline);
-
-    // Extra goal — assigned to a subset only
-    const extra = EXTRA_GOAL[dept.id];
-    const assignedSubset = deptEmployees.slice(0, Math.max(2, Math.floor(deptEmployees.length * 0.35)));
-    const extraEndDate = extra.endsPast ? isoDate(new Date(today.getFullYear(), today.getMonth(), 0)) : isoDate(new Date(today.getFullYear(), today.getMonth() + 1, 15));
-    const extraGoal = {
-      id: nextId("goal"),
-      deptId: dept.id,
-      name: extra.name,
-      description: extra.desc,
-      isTeamGoal: false,
-      active: true,
-      startDate: isoDate(new Date(today.getFullYear(), today.getMonth() - (extra.endsPast ? 2 : 0), 1)),
-      endDate: extraEndDate,
-      reviewCutoffDate: addDays(extraEndDate, 5),
-      tasks: extra.tasks.map((t) => ({ id: nextId("task"), text: t.text, weight: t.weight, requiresAttachment: !!t.requiresAttachment, requiresRemark: !!t.requiresRemark })),
-      assignedEmployeeIds: assignedSubset.map((e) => e.id),
-    };
-    goals.push(extraGoal);
-
-    // Seed records with varied approval states
-    [baseline, extraGoal].forEach((goal) => {
-      goal.assignedEmployeeIds.forEach((empId, empIdx) => {
-        goal.tasks.forEach((task, taskIdx) => {
-          const deptSalt = dept.id.charCodeAt(0) + dept.id.length * 5;
-          const roll = (empIdx * 7 + taskIdx * 13 + goal.tasks.length + deptSalt) % 10;
-          if (roll < 4) setRecord(empId, goal.id, task.id, { done: true, approval: "approved", awardedPoints: task.weight, awardedWeight: task.weight, submittedAt: today.toISOString() });
-          else if (roll < 5) setRecord(empId, goal.id, task.id, { done: true, approval: "approved", awardedPoints: Math.round(task.weight * 0.6), awardedWeight: task.weight, remark: "Partial credit — only half delivered", submittedAt: today.toISOString() });
-          else if (roll < 7) setRecord(empId, goal.id, task.id, { done: true, approval: "pending", submittedAt: today.toISOString() });
-          else if (roll < 8) setRecord(empId, goal.id, task.id, { done: true, approval: "pending", remark: "Needs more detail before I can approve this", submittedAt: today.toISOString() });
-          // else: left untouched (not done)
-        });
-      });
-    });
-
-    // Seed check-ins for a few employees in this department
-    deptEmployees.slice(0, 4).forEach((emp, idx) => {
-      for (let d = 0; d < 3; d++) {
-        const day = new Date(today);
-        day.setDate(day.getDate() - d);
-        day.setHours(9, 15 + idx * 4, 0, 0);
-        const lat = 1.4927 + (Math.random() - 0.5) * 0.01;
-        const lng = 103.7414 + (Math.random() - 0.5) * 0.01;
-        checkins.push({ id: nextId("ci"), empId: emp.id, deptId: dept.id, type: "in", timestamp: day.toISOString(), lat, lng, photo: null, elapsedSec: 60 + idx * 20, withinWindow: true });
-        const out = new Date(day);
-        out.setHours(18, 5, 0, 0);
-        checkins.push({ id: nextId("ci"), empId: emp.id, deptId: dept.id, type: "out", timestamp: out.toISOString(), lat: lat + 0.001, lng: lng + 0.001, photo: null, elapsedSec: 0, withinWindow: true });
-      }
-    });
-
-    // Seed a review for one employee
-    if (deptEmployees[0]) {
-      reviews.push({
-        id: nextId("rv"),
-        empId: deptEmployees[0].id,
-        month: today.toLocaleDateString(undefined, { month: "long", year: "numeric" }),
-        remark: "5-star review from a client — praised responsiveness and follow-through.",
-        screenshot: "google-review-screenshot.png",
-        createdAt: today.toISOString(),
-      });
-    }
-  });
-
-  // Seed rewards: a couple department, a couple individual
-  rewards.push({ id: nextId("rw"), targetType: "department", deptId: "sales", empId: null, month: today.toLocaleDateString(undefined, { month: "long", year: "numeric" }), amount: 500, note: "Best-performing department this month" });
-  rewards.push({ id: nextId("rw"), targetType: "individual", deptId: null, empId: employees.find((e) => e.deptId === "marketing")?.id, month: today.toLocaleDateString(undefined, { month: "long", year: "numeric" }), amount: 150, note: "Top individual performer — Marketing" });
-
-  // Seed one example reward scheme — Sales dept, tied to the Sales Team Goal, so the Rewards tab has something to show
-  const rewardSchemes = [];
-  const salesGoal = goals.find((g) => g.deptId === "sales" && g.isTeamGoal);
-  if (salesGoal) {
-    const salesEmployeeIds = employees.filter((e) => e.deptId === "sales").map((e) => e.id);
-    rewardSchemes.push({
-      id: nextId("rwscheme"), deptId: "sales", companyId: "ingenious", goalId: salesGoal.id,
-      startDate: isoDate(new Date(today.getFullYear(), 0, 1)), endDate: isoDate(new Date(today.getFullYear(), 11, 31)),
-      baseAmount: 500, active: true,
-      enrolledEmployeeIds: salesEmployeeIds.slice(0, 4),
-      employeeOverrides: {},
-      futureRewardPercent: null, futureBaseAmount: null, futureEffectiveMonth: null,
-    });
-  }
-
-  return { goals, goalRecords, checkins, reviews, rewards, rewardSchemes };
-}
-
 // ---------------- Root ----------------
 
 function KPIApp() {
@@ -405,8 +199,6 @@ function KPIApp() {
   const [goals, setGoals] = useState([]);
   const [goalRecords, setGoalRecords] = useState({});
   const [checkins, setCheckins] = useState([]);
-  const [reviews, setReviews] = useState([]);
-  const [rewards, setRewards] = useState([]);
   const [rewardSchemes, setRewardSchemes] = useState([]);
   const [session, setSession] = useState(null); // {role, employeeId, name, email, deptId, companyId}
   const [authLoading, setAuthLoading] = useState(true);
@@ -497,7 +289,10 @@ function KPIApp() {
       if (rewardEnrollmentsRes.error) console.error("Failed to load reward enrollments:", rewardEnrollmentsRes.error);
 
       setCompanies((companiesRes.data || []).map((c) => ({
-        id: c.id, name: c.name, active: c.active !== false,
+        id: c.id, name: c.name, description: c.description || "", active: c.active !== false,
+        // Archiving a company requires a stated reason + an uploaded letter of proof (see archiveCompany
+        // below) — carried through here so AdminCompanies can show why/when a company was archived.
+        archivedReason: c.archived_reason || null, archivedProofUrl: c.archived_proof_url || null, archivedAt: c.archived_at || null,
       })));
       setDepartments((departmentsRes.data || []).map((d) => ({
         id: d.id, name: d.name, color: d.color || "slate", colorHex: d.color_hex ?? d.colorHex ?? null,
@@ -642,7 +437,16 @@ function KPIApp() {
       awarded_weight: record.awardedWeight ?? null,
       attachment_url: record.attachment || null,
       no_attachment_reason: !!record.noAttachmentReason,
-    }, { onConflict: "employee_id,goal_id,task_id" }).then(({ error }) => { if (error) console.error("Failed to save goal record:", error); });
+    }, { onConflict: "employee_id,goal_id,task_id" }).then(({ error }) => {
+      if (error) {
+        console.error("Failed to save goal record:", error);
+        // Without this, a blocked/failed write (e.g. RLS silently rejecting an update to an
+        // already-approved record) looks identical to success: local state already shows the
+        // change, and nothing tells the user their edit never actually reached the database —
+        // until the next reload quietly reverts it back to the old value with no explanation.
+        notify("Couldn't save that change — please refresh the page and try again.");
+      }
+    });
   };
 
   // Toggling: staff use this to tick/untick their own task. Admin uses adminUntick (below) instead, which notifies.
@@ -650,6 +454,14 @@ function KPIApp() {
     if (isGoalLocked(goal)) return;
     const k = key(empId, goal.id, taskId);
     const cur = goalRecords[k] || defaultRecord();
+    if (cur.done && cur.approval === "approved") {
+      // RLS locks a goal_records row the moment it's approved — staff's own update/insert policies
+      // both require approval <> 'approved', so an un-tick here would be silently rejected by the
+      // database while the UI still shows it as if it worked (until the next reload reverts it).
+      // Block it here instead, with a real message, rather than letting that dead-end play out.
+      notify("This task has already been approved — ask your admin to un-tick it if you need to change or resubmit anything.");
+      return;
+    }
     const merged = cur.done
       ? { ...cur, done: false, approval: "none", awardedPoints: null }
       : { ...cur, done: true, approval: "pending", submittedAt: new Date().toISOString() };
@@ -1156,13 +968,52 @@ function KPIApp() {
     if (patch.description !== undefined) dbPatch.description = patch.description;
     if (Object.keys(dbPatch).length) supabaseClient.from("companies").update(dbPatch).eq("id", companyId).then(({ error }) => { if (error) console.error("Failed to update company:", error); });
   };
-  const archiveCompany = (companyId) => {
-    setCompanies((prev) => prev.map((c) => c.id === companyId ? { ...c, active: false } : c));
-    supabaseClient.from("companies").update({ active: false }).eq("id", companyId).then(({ error }) => { if (error) console.error("Failed to archive company:", error); });
+  // Archiving a company is Scorecard's version of "delete" for a company — data is never hard-deleted,
+  // just hidden (active: false) and reversible via restoreCompany. Per Belle: since this removes a
+  // company's visibility across the whole multi-company system, it requires a stated reason and an
+  // uploaded letter of proof before it's allowed to go through — both get stored on the row so there's
+  // a permanent record of why/when a company was archived, even after a later restore.
+  const archiveCompany = async (companyId, { reason, proofFile }) => {
+    if (!reason || !reason.trim()) { notify("A reason is required to archive a company."); return false; }
+    if (!proofFile) { notify("A letter of proof must be attached to archive a company."); return false; }
+
+    const safeName = proofFile.name.replace(/[^a-zA-Z0-9.\-]+/g, "-");
+    const path = `${companyId}/${Date.now()}-${safeName}`;
+    const { data: uploadData, error: uploadError } = await supabaseClient.storage.from("letters-of-proof").upload(path, proofFile);
+    if (uploadError || !uploadData?.path) {
+      console.error("Failed to upload letter of proof:", uploadError);
+      notify("Couldn't upload the letter of proof — please try again.");
+      return false;
+    }
+
+    const archivedAt = new Date().toISOString();
+    const patch = { active: false, archived_reason: reason.trim(), archived_proof_url: uploadData.path, archived_at: archivedAt };
+    const { error } = await supabaseClient.from("companies").update(patch).eq("id", companyId);
+    if (error) {
+      console.error("Failed to archive company:", error);
+      notify("Couldn't archive that company — please try again.");
+      return false;
+    }
+    setCompanies((prev) => prev.map((c) => c.id === companyId
+      ? { ...c, active: false, archivedReason: reason.trim(), archivedProofUrl: uploadData.path, archivedAt }
+      : c));
+    return true;
   };
   const restoreCompany = (companyId) => {
+    // Deliberately leaves archivedReason/archivedProofUrl/archivedAt in place on restore — they're kept
+    // as a historical record of the last archival, not cleared, matching the audit-trail intent above.
     setCompanies((prev) => prev.map((c) => c.id === companyId ? { ...c, active: true } : c));
     supabaseClient.from("companies").update({ active: true }).eq("id", companyId).then(({ error }) => { if (error) console.error("Failed to restore company:", error); });
+  };
+  // Signed URL for viewing a company's letter of proof (private bucket, same pattern as task attachments).
+  const openCompanyProof = async (path) => {
+    const { data, error } = await supabaseClient.storage.from("letters-of-proof").createSignedUrl(path, 300);
+    if (error || !data?.signedUrl) {
+      console.error("Failed to open letter of proof:", error);
+      notify("Couldn't open that file — it may have been removed.");
+      return;
+    }
+    window.open(data.signedUrl, "_blank", "noopener");
   };
 
   const findEmployeeByEmail = (email) => employees.find((e) => e.email && e.email.trim().toLowerCase() === email.trim().toLowerCase());
@@ -1244,10 +1095,6 @@ function KPIApp() {
       withinWindow: data.within_window, address: data.address || null,
     }, ...prev]);
   };
-  const addReview = (record) => setReviews((prev) => [record, ...prev]);
-  const updateReview = (id, patch) => setReviews((prev) => prev.map((r) => r.id === id ? { ...r, ...patch } : r));
-  const addReward = (record) => setRewards((prev) => [record, ...prev]);
-
   // ---- Reward schemes (preset, recurring — like a goal, but pays out based on goal performance) ----
   // Creates the scheme row in Supabase first (mirrors addGoal) so local state holds the real DB id from
   // the start — every later action here (enroll, override, edit) looks the scheme up by that id.
@@ -1452,11 +1299,11 @@ function KPIApp() {
   }
 
   const sharedProps = {
-    companies, addCompany, updateCompany, archiveCompany, restoreCompany,
+    companies, addCompany, updateCompany, archiveCompany, restoreCompany, openCompanyProof,
     employees, departments, deptById, goals, getRecord, toggleTask, adminUntick, submitTaskWithDetails, setApproval, setRemark, setAdminRemark, setAttachment,
     isGoalLocked, isReviewLocked, employeeGoals, employeePoints, addGoal, updateGoal, archiveGoal, restoreGoal, addTaskToGoal, updateTaskRequiresAttachment, updateTaskRequiresRemark, updateTaskText,
     removeTaskFromGoal, updateTaskWeight, toggleAssignment, addEmployee, updateEmployee, archiveEmployee, restoreEmployee, resetEmployeePassword, addDepartment, archiveDepartment, restoreDepartment, checkins, addCheckin,
-    reviews, addReview, updateReview, rewards, addReward, notify,
+    notify,
     rewardSchemes, addRewardScheme, archiveRewardScheme, restoreRewardScheme, toggleRewardActive, toggleRewardEnrollment, updateRewardEmployeeOverride, commitRewardSchemeEdit, goalCompletionForEmployee,
     getMonthView, commitCurrentMonthEdit, scheduleFutureVersion, employeeAnnualPoints,
   };
@@ -2584,46 +2431,9 @@ function StaffLeaderboard({ employees, departments, deptById, employeePoints, em
   );
 }
 
-function StaffReview({ employee, colors, reviews, addReview, updateReview }) {
-  const [remark, setRemark] = useState("");
-  const [fileName, setFileName] = useState("");
-  const myReviews = reviews.filter((r) => r.empId === employee.id);
-
-  const submit = () => {
-    if (!remark.trim()) return;
-    addReview({ id: `rv-${Date.now()}`, empId: employee.id, month: new Date().toLocaleDateString(undefined, { month: "long", year: "numeric" }), remark, screenshot: fileName || "review-screenshot.png", createdAt: new Date().toISOString() });
-    setRemark(""); setFileName("");
-  };
-
-  return (
-    <div>
-      <p className="text-xs uppercase tracking-wide text-slate-400 font-medium mb-2 px-1">Monthly Google review</p>
-      <div className="bg-white rounded-xl border border-slate-200 p-4 mb-5">
-        <label className="flex items-center gap-2 justify-center border border-dashed border-slate-300 rounded-lg py-4 mb-3 cursor-pointer text-slate-400 text-sm">
-          <Upload size={16} />
-          {fileName || "Attach screenshot"}
-          <input type="file" accept="image/*" className="hidden" onChange={(e) => setFileName(e.target.files?.[0]?.name || "")} />
-        </label>
-        <textarea value={remark} onChange={(e) => setRemark(e.target.value)} placeholder="Which client gave this review? Any context or expectations to note…" className="w-full text-sm border border-slate-200 rounded-lg p-3 mb-3 focus:outline-none focus:ring-2 focus:ring-teal-600" rows={3} />
-        <button onClick={submit} className={`w-full py-2.5 rounded-lg ${colors.bg} text-white text-sm font-semibold`}>Submit review</button>
-      </div>
-
-      <p className="text-xs uppercase tracking-wide text-slate-400 font-medium mb-2 px-1">Your submitted reviews</p>
-      <div className="space-y-2">
-        {myReviews.length === 0 && <p className="text-sm text-slate-400 px-1">No reviews submitted yet.</p>}
-        {myReviews.map((r) => (
-          <div key={r.id} className="bg-white rounded-lg border border-slate-200 p-3.5">
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-xs font-medium text-slate-500">{r.month}</span>
-              <span className="text-[11px] text-slate-400">{r.screenshot}</span>
-            </div>
-            <textarea value={r.remark} onChange={(e) => updateReview(r.id, { remark: e.target.value })} className="w-full text-sm text-slate-700 border-0 focus:outline-none focus:ring-1 focus:ring-teal-600 rounded resize-none" rows={2} />
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
+// (StaffReview — the unmounted "submit a client review" mock component — was removed 2026-09-29 as
+// part of Phase 10 cleanup. It was never wired into the app's nav; "monthly Google review" is handled
+// as a regular goal task with requiresAttachment/requiresRemark instead. See scorecard-rls-status.md.)
 
 // ================= ADMIN APP =================
 
@@ -2732,12 +2542,18 @@ function SectionTitle({ children, sub }) {
   );
 }
 
-function AdminCompanies({ companies, addCompany, updateCompany, archiveCompany, restoreCompany, departments, employees, deptById, notify }) {
+function AdminCompanies({ companies, addCompany, updateCompany, archiveCompany, restoreCompany, openCompanyProof, departments, employees, deptById, notify }) {
   const [showAdd, setShowAdd] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState("");
+  // Which company's "archive" confirm panel is open, if any — plus that panel's own draft state.
+  const [archivingId, setArchivingId] = useState(null);
+  const [archiveReason, setArchiveReason] = useState("");
+  const [archiveProofName, setArchiveProofName] = useState("");
+  const [archiveProofFile, setArchiveProofFile] = useState(null);
+  const [archiveBusy, setArchiveBusy] = useState(false);
 
   const submit = () => {
     if (!name.trim()) return;
@@ -2752,6 +2568,18 @@ function AdminCompanies({ companies, addCompany, updateCompany, archiveCompany, 
     updateCompany(id, { name: editName.trim() });
     notify("Company renamed");
     setEditingId(null);
+  };
+
+  const startArchive = (id) => {
+    setArchivingId(id);
+    setArchiveReason(""); setArchiveProofName(""); setArchiveProofFile(null);
+  };
+  const cancelArchive = () => setArchivingId(null);
+  const confirmArchive = async (c) => {
+    setArchiveBusy(true);
+    const ok = await archiveCompany(c.id, { reason: archiveReason, proofFile: archiveProofFile });
+    setArchiveBusy(false);
+    if (ok) { notify(`Archived "${c.name}"`); setArchivingId(null); }
   };
 
   return (
@@ -2776,33 +2604,68 @@ function AdminCompanies({ companies, addCompany, updateCompany, archiveCompany, 
           const deptCount = departments.filter((d) => d.companyId === c.id && d.active !== false).length;
           const empCount = employees.filter((e) => deptById[e.deptId]?.companyId === c.id && e.active !== false).length;
           return (
-            <div key={c.id} className={`bg-white rounded-xl border p-4 flex items-center justify-between ${c.active === false ? "border-slate-100 opacity-60" : "border-slate-200"}`}>
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-lg bg-slate-900 flex items-center justify-center shrink-0"><Building className="text-white" size={16} /></div>
-                <div>
-                  {editingId === c.id ? (
-                    <div className="flex items-center gap-2">
-                      <input value={editName} onChange={(e) => setEditName(e.target.value)} className="px-2 py-1 rounded-md border border-slate-200 text-sm" autoFocus />
-                      <button onClick={() => saveEdit(c.id)} className="text-xs font-medium text-emerald-600 hover:underline">Save</button>
-                      <button onClick={() => setEditingId(null)} className="text-xs font-medium text-slate-400 hover:underline">Cancel</button>
-                    </div>
-                  ) : (
-                    <p className="text-sm font-semibold text-slate-800">{c.name}{c.active === false && <span className="ml-2 text-[11px] font-normal text-slate-400">(archived)</span>}</p>
+            <div key={c.id} className={`bg-white rounded-xl border p-4 ${c.active === false ? "border-slate-100 opacity-60" : "border-slate-200"}`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-lg bg-slate-900 flex items-center justify-center shrink-0"><Building className="text-white" size={16} /></div>
+                  <div>
+                    {editingId === c.id ? (
+                      <div className="flex items-center gap-2">
+                        <input value={editName} onChange={(e) => setEditName(e.target.value)} className="px-2 py-1 rounded-md border border-slate-200 text-sm" autoFocus />
+                        <button onClick={() => saveEdit(c.id)} className="text-xs font-medium text-emerald-600 hover:underline">Save</button>
+                        <button onClick={() => setEditingId(null)} className="text-xs font-medium text-slate-400 hover:underline">Cancel</button>
+                      </div>
+                    ) : (
+                      <p className="text-sm font-semibold text-slate-800">{c.name}{c.active === false && <span className="ml-2 text-[11px] font-normal text-slate-400">(archived)</span>}</p>
+                    )}
+                    <p className="text-xs text-slate-400">{deptCount} departments · {empCount} staff</p>
+                    {c.description && <p className="text-xs text-slate-500 mt-0.5">{c.description}</p>}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1">
+                  {editingId !== c.id && (
+                    <button onClick={() => { setEditingId(c.id); setEditName(c.name); }} title="Rename" className="p-1.5 rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-600"><Pencil size={14} /></button>
                   )}
-                  <p className="text-xs text-slate-400">{deptCount} departments · {empCount} staff</p>
-                  {c.description && <p className="text-xs text-slate-500 mt-0.5">{c.description}</p>}
+                  {c.active === false ? (
+                    <button onClick={() => { restoreCompany(c.id); notify(`Restored "${c.name}"`); }} title="Restore" className="p-1.5 rounded-md text-emerald-600 hover:bg-emerald-50"><Undo2 size={14} /></button>
+                  ) : (
+                    <button onClick={() => startArchive(c.id)} title="Archive" className="p-1.5 rounded-md text-slate-400 hover:bg-rose-50 hover:text-rose-500"><Trash2 size={14} /></button>
+                  )}
                 </div>
               </div>
-              <div className="flex items-center gap-1">
-                {editingId !== c.id && (
-                  <button onClick={() => { setEditingId(c.id); setEditName(c.name); }} title="Rename" className="p-1.5 rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-600"><Pencil size={14} /></button>
-                )}
-                {c.active === false ? (
-                  <button onClick={() => { restoreCompany(c.id); notify(`Restored "${c.name}"`); }} title="Restore" className="p-1.5 rounded-md text-emerald-600 hover:bg-emerald-50"><Undo2 size={14} /></button>
-                ) : (
-                  <button onClick={() => { archiveCompany(c.id); notify(`Archived "${c.name}"`); }} title="Archive" className="p-1.5 rounded-md text-slate-400 hover:bg-rose-50 hover:text-rose-500"><Trash2 size={14} /></button>
-                )}
-              </div>
+
+              {/* Archived companies keep a permanent record of why/when — required at archive time (below). */}
+              {c.active === false && (c.archivedReason || c.archivedProofUrl) && (
+                <div className="mt-3 ml-12 pl-3 border-l-2 border-slate-100 text-xs text-slate-500">
+                  {c.archivedAt && <p className="text-slate-400">Archived {fmtDate(c.archivedAt.slice(0, 10))}</p>}
+                  {c.archivedReason && <p className="mt-0.5">Reason: {c.archivedReason}</p>}
+                  {c.archivedProofUrl && (
+                    <button onClick={() => openCompanyProof(c.archivedProofUrl)} className="mt-1 text-teal-700 hover:underline">📎 View letter of proof</button>
+                  )}
+                </div>
+              )}
+
+              {archivingId === c.id && (
+                <div className="mt-3 ml-12 bg-rose-50 border border-rose-200 rounded-lg p-3.5">
+                  <p className="text-xs font-medium text-rose-700 mb-2">Archiving "{c.name}" hides it (and its departments/goals/people) everywhere in Scorecard. Data isn't deleted and this can be undone with Restore, but a reason and a letter of proof are required first.</p>
+                  <textarea value={archiveReason} onChange={(e) => setArchiveReason(e.target.value)} placeholder="Reason for archiving this company…" rows={2} className="w-full text-xs border border-rose-200 rounded-lg p-2 mb-2 focus:outline-none focus:ring-1 focus:ring-rose-400" />
+                  <label className="flex items-center gap-2 text-xs text-rose-700 mb-3 cursor-pointer">
+                    <span className="px-2.5 py-1.5 rounded-md border border-rose-300 bg-white hover:bg-rose-50">Attach letter of proof</span>
+                    {archiveProofName || "No file selected"}
+                    <input type="file" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; setArchiveProofFile(f || null); setArchiveProofName(f?.name || ""); }} />
+                  </label>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => confirmArchive(c)}
+                      disabled={archiveBusy || !archiveReason.trim() || !archiveProofFile}
+                      className="px-3 py-1.5 rounded-lg bg-rose-600 text-white text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {archiveBusy ? "Archiving…" : "Confirm archive"}
+                    </button>
+                    <button onClick={cancelArchive} disabled={archiveBusy} className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 text-xs font-medium">Cancel</button>
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
